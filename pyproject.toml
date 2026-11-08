@@ -1,0 +1,31 @@
+[project]
+name = "guitar-reverser"
+version = "0.1.0"
+description = "Reverse a guitar video or song into a beginner-friendly tab with fingering, picking and a 3D player."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "numpy",
+    "scipy",
+    "soundfile",
+    "librosa>=0.10",
+    "torch",
+    "torchaudio",
+    "demucs>=4.0",
+    "basic-pitch>=0.4",
+    "mediapipe",
+    "opencv-python",
+    "transformers>=4.40",
+    "pillow",
+    "pretty_midi",
+    "mir_eval",
+]
+
+[project.scripts]
+reverser = "reverser.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["reverser"]

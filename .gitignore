@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# large intermediate files and downloaded model weights
+work/
+models/
+
+# analysed songs contain copyrighted audio/video: keep them local
+web/public/songs/*
+!web/public/songs/.gitkeep
+
+# web build
+web/node_modules/
+web/dist/
+*.egg-info/
+.pytest_cache/

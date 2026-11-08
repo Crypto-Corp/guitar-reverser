@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Guitar Reverser</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand"><span class="logo">◆</span> Guitar Reverser</div>
+        <select id="song-select" aria-label="Song"></select>
+        <div class="meta" id="meta"></div>
+        <div class="spacer"></div>
+        <div class="seg" id="mode-seg" role="tablist" aria-label="Difficulty">
+          <button data-mode="chords" title="Chord shapes + strum/picking pattern (1)">Chords</button>
+          <button data-mode="easy" title="Simplified tab: bass + melody on chord shapes (2)">Easy tab</button>
+          <button data-mode="full" title="Everything that was transcribed (3)">Full tab</button>
+        </div>
+      </header>
+
+      <main class="stage">
+        <section class="board" id="board">
+          <div class="board-overlay">
+            <div class="seg small" id="view-seg">
+              <button data-view="player" title="As you see your own guitar">Player view</button>
+              <button data-view="teacher" title="Mirror, like facing a teacher">Teacher view</button>
+              <button data-view="top">Top</button>
+            </div>
+            <div class="legend">
+              <span><i style="background:#3b82f6"></i>1 index</span>
+              <span><i style="background:#22c55e"></i>2 middle</span>
+              <span><i style="background:#f59e0b"></i>3 ring</span>
+              <span><i style="background:#ec4899"></i>4 pinky</span>
+              <span><i style="background:#f4f1ea"></i>0 open</span>
+            </div>
+          </div>
+          <div class="now-chord" id="now-chord"></div>
+        </section>
+
+        <aside class="side">
+          <div class="video-wrap" id="video-wrap">
+            <video id="video" playsinline muted></video>
+            <canvas id="hands"></canvas>
+            <label class="toggle tiny"><input type="checkbox" id="show-hands" checked /> hand tracking</label>
+          </div>
+          <div class="card">
+            <div class="card-title">Now → Next</div>
+            <div class="chord-pair"><div id="chord-now"></div><div class="arrow">→</div><div id="chord-next"></div></div>
+            <div class="next-in" id="next-in"></div>
+          </div>
+          <div class="card">
+            <div class="card-title" id="pattern-title">Pattern</div>
+            <div class="pattern" id="pattern"></div>
+            <div class="hint" id="pattern-hint"></div>
+          </div>
+          <div class="card">
+            <div class="card-title">Song chords</div>
+            <div class="chord-strip" id="chord-strip"></div>
+          </div>
+          <div class="card info" id="info"></div>
+        </aside>
+      </main>
+
+      <section class="tab" id="tab"></section>
+
+      <section class="timeline" id="timeline"></section>
+
+      <footer class="transport">
+        <button id="play" class="big" title="Play / pause (space)">▶</button>
+        <button id="back" title="Back 5 s (←)">⟲5</button>
+        <span id="clock" class="clock">0:00 / 0:00</span>
+        <label class="ctl">Speed <input id="speed" type="range" min="0.4" max="1" step="0.05" value="1" /> <b id="speed-val">100%</b></label>
+        <button id="loop" title="Loop the current section (L)">⟳ Loop section</button>
+        <label class="ctl">Guitar <input id="vol-guitar" type="range" min="0" max="1" step="0.05" value="1" /></label>
+        <label class="ctl">Voice &amp; rest <input id="vol-backing" type="range" min="0" max="1" step="0.05" value="0.8" /></label>
+        <label class="toggle"><input type="checkbox" id="synth" /> Tab synth</label>
+        <label class="toggle"><input type="checkbox" id="click" /> Metronome</label>
+        <button id="countin" title="Count-in before playing">Count-in</button>
+        <a id="dl-tab" class="dl" download>⬇ tab.txt</a>
+        <a id="dl-mid" class="dl" download>⬇ MIDI</a>
+      </footer>
+    </div>
+    <div id="empty" class="empty" hidden>
+      <h1>No song analysed yet</h1>
+      <p>Run the analyser on a video or audio file:</p>
+      <pre>.venv/bin/reverser analyze ~/Downloads/my-song.mp4 --title "My song"</pre>
+      <p>then reload this page.</p>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
