@@ -53,11 +53,11 @@ flowchart LR
 |---|---|---|
 | Stems | [Demucs](https://github.com/facebookresearch/demucs) `htdemucs_6s` | guitar = guitar + bass + ½ other (acoustic low strings leak into "bass") |
 | Notes | [Basic Pitch](https://github.com/spotify/basic-pitch) | tuning correction, merging, octave-ghost and vocal-bleed filters |
-| Rhythm | [librosa](https://librosa.org) beat tracker | meter and downbeat from chord changes and bass onsets |
-| Chords | — | beat-synchronous chroma from the note posteriorgram, bass weighting, two-pass key prior, "no chord" state, Viterbi |
+| Rhythm | [librosa](https://librosa.org) beat tracker, or [beat_this](https://github.com/CPJKU/beat_this) if installed | **metronome detection** (a click track is a ground-truth grid), meter and downbeat from accents, chord changes and bass onsets |
+| Chords & key | — | beat-synchronous chroma from the note posteriorgram, bass weighting, key from note profile + draft chords, key prior, "no chord" state, Viterbi; maj, min, 7, maj7, m7, m7♭5 |
 | Guitar in the picture | [OWLv2](https://huggingface.co/google/owlv2-base-patch16-ensemble) (open-vocabulary detection) | neck axis from body → fretting hand, nut from an aligned headstock |
 | Hands | [MediaPipe Hand Landmarker](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker) | fret from geometry (`−12·log2(1 − d/scale)`), picking-hand velocity |
-| Fingering | — | Viterbi over hand states with drop states for ghost notes, then fretting fingers and picking fingers |
+| Fingering | — | Viterbi over (fingering, **hand position**) states with costs fitted on GuitarSet, drop states for ghost notes, then fretting and picking fingers |
 | Player | [three.js](https://threejs.org), Vite, TypeScript | everything in `web/` |
 
 ## Quick start
@@ -68,6 +68,12 @@ Needs Python 3.10–3.12, Node 18+, `ffmpeg`. Tested on an M1 Mac (Demucs uses M
 uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e .
 npm --prefix web install
+```
+
+Optional, better beats and downbeats ([beat_this](https://github.com/CPJKU/beat_this), ISMIR 2024). The pipeline uses it automatically when it's installed:
+
+```bash
+uv pip install --python .venv/bin/python -e ".[beats]"
 ```
 
 Try the player straight away. A CC-licensed demo song is bundled:
@@ -118,11 +124,10 @@ Analysed songs stay on your machine: `web/public/songs/` and `work/` are git-ign
 - **3D fretboard**: notes fall onto the exact string and fret, coloured by finger (1 index · 2 middle · 3 ring · 4 pinky · open). Ringing strings glow and vibrate. Drag to orbit.
 - **Tab lane** under a fixed playhead: chord names, bar numbers, sustains, p/i/m/a or ↓/↑. Click or drag to seek; Ctrl+wheel zooms.
 - **Practice**: speed 40–100 % with pitch preserved, loop a section, count-in, metronome on the detected beats.
-- **Stems**: separate *guitar* and *voice & rest* volumes. Mute the guitar and play along.
-- **Tab synth**: hear the transcription itself, to spot mistakes.
+- **Sound**: the simulation plays the notes you see falling (guitar-like synth, on by default, `S` to toggle). The original recording plays as two stems, *guitar* and *voice & rest*, each with its own volume: mute the guitar and play along. 🔊 / `M` mutes everything. Settings are remembered.
 - **Video** with the hand-tracking overlay (fretting hand, picking hand, estimated fret).
 - **Deep links**: `?song=demo&mode=full&t=14&view=top`.
-- **Keys**: `space` play · `←/→` ±5 s · `L` loop · `1/2/3` modes · `-/+` speed.
+- **Keys**: `space` play · `←/→` ±5 s · `L` loop · `M` mute · `S` simulation sound · `1/2/3` modes · `-/+` speed.
 
 </td>
 </tr>
@@ -137,35 +142,60 @@ Analysed songs stay on your machine: `web/public/songs/` and `work/` are git-ign
 
 `reverser bench` runs the same code as `reverser analyze` on the microphone recordings and scores every stage with [mir_eval](https://github.com/craffel/mir_eval).
 
-| Stage | Score |
-|---|---|
-| Notes, raw Basic Pitch (onset ±50 ms, exact pitch) | F1 71.6 (P 61.9 · R 84.8) |
-| Notes, after cleanup + fingering | **F1 73.7** (P 66.0 · R 83.5) |
-| **Tab**: onset + pitch + **string** all right | **F1 47.8** (P 42.8 · R 54.2) |
-| String chosen correctly, on correctly transcribed notes | **64.9 %** (lowest-fret baseline 43.4 %) |
-| Chords on accompaniments: root / major-minor / sevenths | 79.2 / **77.9** / 66.6 % |
-| Beats F / downbeats F | 48.8 / 26.5 % |
-| Tempo within 4 % (octave errors allowed) | 58.6 % (69.2 %) |
-| Key (mir_eval weighted score) | 67.6 % |
+| Stage | Score | First version |
+|---|---|---|
+| Notes (onset ±50 ms, exact pitch) | **F1 78.9** (P 82.3 · R 75.7) | 64.2 |
+| **Tab**: onset + pitch + **string** all right | **F1 50.4** (P 52.6 · R 48.4) | 39.9 |
+| String chosen correctly, on correctly transcribed notes | **64.0 %** (lowest-fret baseline 42.3 %) | 62.1 % |
+| Chords on accompaniments: root / major-minor / sevenths | 79.8 / **78.1** / 67.5 % | 79.2 / 77.9 / 66.6 % |
+| Key (mir_eval weighted score) | **79.6 %** | 67.6 % |
+| Beats F / downbeats F | 48.8 / 26.4 % | same |
+| Tempo within 4 % (octave errors allowed) | 58.6 % (69.2 %) | same |
 
 **The fingering stage alone**, fed the true notes (string accuracy):
 
-| Method | All | Singer-songwriter comp | Rock comp | Jazz solo |
-|---|---|---|---|---|
-| Lowest fret (classic baseline) | 45.4 % | 72.0 % | 55.7 % | 31.5 % |
-| Viterbi, no chord shapes | 61.4 % | | | |
-| **Viterbi + detected chords (shipped)** | **68.9 %** | **87.6 %** | **82.6 %** | 40.7 % |
-| Viterbi + true chords (upper bound) | 69.4 % | | | |
+| Method | Comp | Solo | All |
+|---|---|---|---|
+| Lowest fret (classic baseline) | 50.7 % | 31.0 % | 45.4 % |
+| First version (low-position bias, one position per note) | 78.6 % | 44.1 % | 69.3 % |
+| **Hand-position model, fitted costs (shipped)** | **83.3 %** | **58.2 %** | **76.5 %** |
+| Same, with the true chords (upper bound) | 85.1 % | 59.8 % | 78.3 % |
+
+### How accuracy was improved
+
+Each change was tuned on players 00–02 and kept only if it also improved players 03–05, whom the tuning never saw.
+
+| Method | Unseen players | Status |
+|---|---|---|
+| Re-plucked notes no longer merged into the previous note | tab F1 39.9 → 47.8 | ✅ bug fix |
+| Basic Pitch thresholds (onset 0.55, frame 0.42, no Melodia) | note F1 72.4 → 79.0 | ✅ |
+| **Hand-position model** (index-finger fret as a Viterbi state; a phrase stays in one box) + costs fitted by coordinate search | fingering 67.2 → 76.0 %, solos 45 → 60 % | ✅ |
+| Key from the note profile (√-compressed Krumhansl) + draft chords instead of chords alone | key 68.2 → 76.8 % | ✅ |
+| Half-diminished chords (m7♭5) | neutral on GuitarSet; needed for minor-key songs | ✅ |
+| Video fret prior converted to capo-relative frets | bug: was off by the capo with a capo | ✅ bug fix |
+| Metronome / click-track detection | exact grid when a click is present | ✅ |
+| librosa beat-tracking variants (tempo priors, Basic Pitch onset envelope) | no gain | ❌ → optional beat_this |
+| OWLv2 capo detection in the picture | unreliable boxes | ❌ |
+| "No note below the capo" as capo evidence | breaks songs with an intro played without capo | ❌ |
 
 What this says:
 
-- **Beginner material works best.** On strummed or picked open-chord songs (singer-songwriter, rock and funk comps), the fingering gets 82–88 % of strings right from the notes alone. Chord recognition reaches 78 % on maj/min.
-- **Chord shapes are the biggest lever.** They raise string accuracy from 61 % to 69 %. Detected chords are almost as good as the true ones.
-- **Solos up the neck are the weak spot**, at 38–46 % string accuracy. The costs are tuned for open positions, while GuitarSet solos mostly sit around frets 5–12. In a video, the hand-position prior covers this.
-- **Rhythm is the weakest stage.** The librosa beat tracker gets the tempo right only 59 % of the time, and bar lines follow from it.
-- **Notes and tab are the end-to-end limit:** Basic Pitch misses or adds about a third of the notes.
-- **Bug found by the benchmark:** the cleanup step treated every re-plucked note as a decay artefact and merged it away. Fixing that raised tab F1 from 39.9 to 47.8.
-- **Caveat:** Basic Pitch saw GuitarSet in training, so the note scores are optimistic. The music logic is hand-written; one threshold (the re-pluck merge ratio) was chosen on this data.
+- **Beginner material works best.** On open-chord songs (singer-songwriter, rock and funk comps), the fingering gets 84–89 % of strings right from the notes.
+- **Fitting the costs removed the "stay low on the neck" bias.** Real players don't fret low by default; a beginner version is what *Easy tab* is for.
+- **Auto capo costs about 9 points on GuitarSet.** It picks a capo for 81 % of excerpts that have none, because a capo makes jazz keys (E♭, A♭…) look like open shapes. With capo 0 forced, string accuracy is 73.3 %. It is kept because it finds real capos, like capo 3 on the lesson video below; `--capo 0` turns it off.
+- **Rhythm is now the weakest stage:** tempo is right in 59 % of excerpts. Install `beat-this`, or record with a metronome.
+- **Caveat:** Basic Pitch saw GuitarSet in training, so the note scores are optimistic. The fingering and key changes do not depend on that.
+
+### Real videos
+
+A fingerstyle lesson whose human-written tab scrolls on screen gives a check outside GuitarSet:
+
+| | Tab in the video | Guitar Reverser |
+|---|---|---|
+| Capo | 3 (intro without) | **3** |
+| Tempo / meter | ♩ = 116, 3/4 | **114.8, 3/4** |
+| Key | C minor | **C minor** (first version: C major) |
+| Chord shapes | Am, Dm, Dm6/F, Bm7♭5, E, E7, A7 | **Am, Dm, Bm7♭5, E, E7**, F, A7 (first version: A, E, D, Bm7) |
 
 <details>
 <summary>Reproduce (≈ 700 MB download, 5 min on an M1)</summary>
@@ -200,8 +230,9 @@ docs/screens/     README screenshots
 
 ## Roadmap
 
-- **Beat tracking**: replace the librosa tracker (weakest stage on GuitarSet) with a modern neural beat/downbeat model.
-- **Up-the-neck playing**: learn the fingering costs from GuitarSet instead of hand-tuning them, so jazz/solo voicings get the right position.
+- **Beat tracking**: benchmark beat_this as the default (optional today).
+- **Capo per section**: a song can switch capo (intro without, verses with), and a capo confidence would avoid false capos.
+- Learn the fingering costs per style, or with a small model trained on GuitarSet + SynthTab.
 - Swap Basic Pitch for a guitar-specific transcriber (fine-tuned on GuitarSet/SynthTab) once one with open weights exists.
 - Per-note video evidence: fingertips against detected strings and frets, not just hand position.
 - Techniques: hammer-on, pull-off, slide, bend, palm mute.
