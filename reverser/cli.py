@@ -30,10 +30,21 @@ def main(argv=None):
     a.add_argument("--out", type=Path, default=ROOT / "web" / "public" / "songs")
     a.add_argument("--work", type=Path, default=ROOT / "work")
     a.add_argument("--force", action="store_true", help="recompute everything (ignore caches)")
+    b = sub.add_parser("bench", help="measure accuracy on GuitarSet (see README: Benchmark)")
+    b.add_argument("--root", type=Path, default=ROOT / "work" / "guitarset")
+    b.add_argument("--limit", type=int, default=None, help="evaluate a spread-out subset of N excerpts")
+    b.add_argument("--players", help="comma-separated player ids, e.g. 00,05")
+    b.add_argument("--jobs", type=int, default=None)
     args = ap.parse_args(argv)
     if args.cmd == "analyze":
         run(args.source, args.out, args.work, title=args.title, slug=args.slug, use_video=not args.no_video,
             capo=args.capo, force=args.force)
+    elif args.cmd == "bench":
+        from . import bench
+
+        s = bench.run(args.root, limit=args.limit, jobs=args.jobs, players=args.players)
+        print(bench.format_report(s))
+        print(f"\n({s['seconds']}s, per-track rows in {args.root / 'results.json'})")
 
 
 if __name__ == "__main__":

@@ -69,3 +69,16 @@ def test_strum_direction_from_string_order():
     assign_fingering(events, [ChordSeg(0, 1, "E", 4, "", 1.0)])
     assign_picking(events, lambda t: 0.0)
     assert events[0].kind == "strum" and events[0].direction == "D"
+
+
+def test_replucked_notes_are_not_merged_but_decay_fragments_are():
+    from reverser.audio import clean_notes
+
+    # same pitch re-strummed right after itself, similar strength: two real notes
+    notes = [Note(0.0, 0.50, 60, 0.8), Note(0.51, 1.0, 60, 0.7)]
+    kept, _ = clean_notes(notes)
+    assert len(kept) == 2
+    # a much weaker fragment glued to the end of a note is a decay artefact
+    notes = [Note(0.0, 0.50, 60, 0.8), Note(0.51, 1.0, 60, 0.3)]
+    kept, _ = clean_notes(notes)
+    assert len(kept) == 1 and kept[0].end == 1.0

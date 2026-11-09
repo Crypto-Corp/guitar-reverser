@@ -336,6 +336,24 @@ def assign_picking(events: list[Event], beat_fn, vel_t=None, vel_v=None) -> None
                 n.pluck = f
 
 
+def fit_tab(notes: list[Note], chords: list[ChordSeg], capo: int | None = None, prior_fn=None,
+            max_capo: int = 5, tuning: list[int] = theory.STANDARD_TUNING):
+    """Notes -> fingered events. Picks the capo (cheapest path) unless one is given.
+
+    Returns (events, capo, capo_scores, dropped_note_count). `notes` are modified in place.
+    """
+    def cost_for(c):
+        evs = group_events([Note(n.start, n.end, n.pitch, n.amp) for n in notes])
+        return assign_fingering(evs, chords, tuning, capo=c, prior_fn=prior_fn) / max(1, len(evs))
+
+    scores = []
+    if capo is None:
+        capo, scores = choose_capo(cost_for, max_capo=max_capo)
+    events = group_events(notes)
+    assign_fingering(events, chords, tuning, capo=capo, prior_fn=prior_fn)
+    return events, capo, scores, getattr(assign_fingering, "last_dropped", 0)
+
+
 def choose_capo(notes_events_fn, max_capo: int = 5) -> tuple[int, list]:
     """Try several capo positions; the cheapest fingering path wins."""
     scores = []

@@ -128,20 +128,9 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
     notes, clean_stats = audio.clean_notes(A["raw"], A["vocal_notes"])
     s0, s1 = A["span"]
     notes = [n for n in notes if s0 - 1.0 <= n.start <= s1 + 1.0]
-    chroma, _ = audio.chroma_from_posteriorgram(A["post"])
-    m = (A["times"] >= s0) & (A["times"] <= s1)
-    tonic, mode, key_r = theory.estimate_key(chroma[m].sum(axis=0))
-    grid = A["grid"]
-
     with Step("Recognising chords"):
-        # pass 1 without a key prior -> key from chords -> pass 2 with the key prior
-        draft = audio.recognise_chords(A["post"], A["times"], grid.beats, A["et"], A["en"], None)
-        draft = [c for c in draft if c.end > s0 and c.start < s1]
-        tonic, mode, key_r = audio.key_from_chords(draft)
-        chords = audio.recognise_chords(A["post"], A["times"], grid.beats, A["et"], A["en"], (tonic, mode))
-        chords = [c for c in chords if c.end > s0 - 1 and c.start < s1 + 1]
-        bass_onsets = [n.start for n in notes if n.pitch < 52]
-        grid = audio.fit_meter_and_downbeat(grid, [c.start for c in chords[1:]], bass_onsets)
+        chords, (tonic, mode, key_r), grid = audio.analyse_harmony(
+            A["post"], A["times"], A["grid"], A["et"], A["en"], A["span"], notes)
 
     # -------------------------------------------------------------- video
     prior_fn, vel_t, vel_v, overlay, vision_stats = None, None, None, [], {}
@@ -174,17 +163,8 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
 
     # ------------------------------------------------------------ fusion
     with Step("Optimising fingering (Viterbi)"):
-        def cost_for(c):
-            evs = fingering.group_events([_copy_note(n) for n in notes])
-            return fingering.assign_fingering(evs, chords, capo=c, prior_fn=prior_fn) / max(1, len(evs))
-
-        if capo is None:
-            capo, capo_scores = fingering.choose_capo(cost_for, max_capo=5)
-        else:
-            capo_scores = []
-        events = fingering.group_events(notes)
-        fingering.assign_fingering(events, chords, capo=capo, prior_fn=prior_fn)
-        clean_stats["dropped_by_fingering"] = getattr(fingering.assign_fingering, "last_dropped", 0)
+        events, capo, capo_scores, dropped = fingering.fit_tab(notes, chords, capo=capo, prior_fn=prior_fn)
+        clean_stats["dropped_by_fingering"] = dropped
         clean_stats["final"] = sum(len(e.notes) for e in events)
         arrange.quantise(events, grid)
         bf, tf = arrange.beat_function(grid), arrange.time_function(grid)
@@ -270,10 +250,6 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
     print(f"  key {song['meta']['key']}, {song['meta']['tempo']} BPM, {grid.meter}/4, capo {capo}, "
           f"{len(events)} events, {len([c for c in chords if c.root is not None])} chord changes")
     return out
-
-
-def _copy_note(n):
-    return audio.Note(n.start, n.end, n.pitch, n.amp)
 
 
 def _torch_device() -> str:

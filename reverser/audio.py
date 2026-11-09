@@ -127,6 +127,7 @@ def clean_notes(
     vocal_notes: list[Note] | None = None,
     tuning: list[int] = theory.STANDARD_TUNING,
     max_fret: int = 19,
+    merge_ratio: float = 0.6,
 ) -> tuple[list[Note], dict]:
     """Guitar-aware cleanup of raw transcription."""
     stats = {"raw": len(notes)}
@@ -134,11 +135,12 @@ def clean_notes(
     notes = [n for n in notes if lo <= n.pitch <= hi and n.end - n.start > 0.03]
     stats["in_range"] = len(notes)
 
-    # Merge same-pitch fragments split by a tiny gap (vibrato/decay artefacts).
+    # Merge same-pitch fragments split by a tiny gap (vibrato/decay artefacts). Only a much
+    # weaker fragment is merged: a similar-strength one is a re-plucked note (GuitarSet: F1 63.7 -> 73.0).
     notes.sort(key=lambda n: (n.pitch, n.start))
     merged: list[Note] = []
     for n in notes:
-        if merged and merged[-1].pitch == n.pitch and n.start - merged[-1].end < 0.03 and n.amp < merged[-1].amp:
+        if merged and merged[-1].pitch == n.pitch and n.start - merged[-1].end < 0.03 and n.amp < merge_ratio * merged[-1].amp:
             merged[-1].end = max(merged[-1].end, n.end)
         else:
             merged.append(n)
@@ -424,6 +426,19 @@ def recognise_chords(
         else:
             segs.append(ChordSeg(float(grid[i]), float(grid[i + 1]), name, root, q, conf))
     return segs
+
+
+def analyse_harmony(post, times, grid: BeatGrid, et, en, span, notes: list[Note]):
+    """Chords (two passes: no key prior -> key from chords -> key prior), key, meter/downbeat."""
+    s0, s1 = span
+    draft = recognise_chords(post, times, grid.beats, et, en, None)
+    draft = [c for c in draft if c.end > s0 and c.start < s1]
+    tonic, mode, key_r = key_from_chords(draft)
+    chords = recognise_chords(post, times, grid.beats, et, en, (tonic, mode))
+    chords = [c for c in chords if c.end > s0 - 1 and c.start < s1 + 1]
+    bass_onsets = [n.start for n in notes if n.pitch < 52]
+    grid = fit_meter_and_downbeat(grid, [c.start for c in chords[1:]], bass_onsets)
+    return chords, (tonic, mode, key_r), grid
 
 
 def guitar_energy(y: np.ndarray, sr: int, hop: int = 1024) -> tuple[np.ndarray, np.ndarray]:
