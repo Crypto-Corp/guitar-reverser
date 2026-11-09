@@ -225,9 +225,18 @@ def assign_fingering(
         ev.chord = seg.name if seg else "N"
         voicings = _chord_voicings(seg, capo)
         prior = prior_fn(ev.t) if prior_fn else None
-        if prior is not None and prior[0] is not None and capo:
-            # the video measures absolute frets; fingering frets count from the capo
-            prior = (max(0.0, prior[0] - capo), prior[1])
+        if prior is not None and prior[0] is not None:
+            # Fingering frets count from the capo. A video estimate measured from the headstock
+            # is absolute; one measured from the visible end of the neck is already relative
+            # to the capo. An estimate behind the capo is impossible: ignore it rather than
+            # let it pull the hand to open position.
+            pos, conf = prior[0], prior[1]
+            src = prior[2] if len(prior) > 2 else "headstock"
+            if capo and src != "neck-end":
+                pos -= capo
+            prior = (max(0.0, pos), conf) if pos >= -0.5 else None
+        else:
+            prior = None
         ev.notes = [n for n in ev.notes if n.pitch - tuning[0] - capo >= 0]  # below the capo: unplayable
         pitches = [n.pitch for n in ev.notes]
         cands = _candidates(pitches, tuning, capo)

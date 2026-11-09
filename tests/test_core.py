@@ -136,3 +136,27 @@ def test_strummed_bar_vs_fingerstyle_pinches():
     sounding = lambda t: 5 if t < 4 else 3  # noqa: E731
     out = classify_strums(strum_bar + pick_bar, sounding)
     assert all(out[:8]) and not any(out[8:])
+
+
+def test_video_fret_estimates_respect_the_capo():
+    from reverser.vision import absolute_fret
+
+    # measured from the headstock: absolute fret; behind a capo on 3 it is impossible
+    assert absolute_fret(5.0, "headstock", 3) == 5.0
+    assert absolute_fret(0.5, "headstock", 3) is None
+    # measured from the visible end of the neck: with a capo that end is the capo
+    assert absolute_fret(1.0, "neck-end", 3) == 4.0
+    assert absolute_fret(1.0, "neck-end", 0) == 1.0
+
+
+def test_impossible_video_hint_does_not_pull_to_open_position():
+    # A melody at frets 5-7 above a capo on 3; the video wrongly says "fret 0" (behind
+    # the capo). That hint must be ignored, not turned into "play in open position".
+    pitches = [43 + 3 + 12 + 5, 43 + 3 + 12 + 7, 43 + 3 + 12 + 5]  # D string, frets 5/7/5 from the capo
+    notes = [Note(0.3 * i, 0.3 * i + 0.25, p, 0.7) for i, p in enumerate(pitches)]
+    events = group_events(notes)
+    assign_fingering(events, [], capo=3, prior_fn=lambda t: (0.0, 1.0, "headstock"))
+    with_bad_hint = [n.fret for e in events for n in e.notes]
+    events = group_events([Note(n.start, n.end, n.pitch, n.amp) for n in notes])
+    assign_fingering(events, [], capo=3, prior_fn=None)
+    assert with_bad_hint == [n.fret for e in events for n in e.notes]

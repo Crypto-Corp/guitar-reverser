@@ -184,6 +184,8 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
     # ------------------------------------------------------------ fusion
     with Step("Optimising fingering (Viterbi)"):
         events, capo, capo_scores, dropped = fingering.fit_tab(notes, chords, capo=capo, prior_fn=prior_fn)
+        if overlay:
+            overlay = vision.export_overlay(frames, capo)  # show absolute frets, none behind the capo
         clean_stats["dropped_by_fingering"] = dropped
         clean_stats["final"] = sum(len(e.notes) for e in events)
         arrange.quantise(events, grid)

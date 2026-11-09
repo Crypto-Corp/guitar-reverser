@@ -25,6 +25,9 @@ log = logging.getLogger(__name__)
 OWL_MODEL = "google/owlv2-base-patch16-ensemble"
 QUERIES = ["a guitar", "a guitar neck with frets", "a guitar headstock", "the sound hole of an acoustic guitar"]
 LABELS = ["guitar", "neck", "headstock", "soundhole"]
+# Hand points averaged to locate the hand on the neck: the four knuckles. The index alone
+# (MCP, PIP, tip) is pulled toward the nut when a finger sticks out without pressing.
+PRESS_LANDMARKS = [5, 9, 13, 17]
 
 # Acoustic guitar geometry (mm): scale length and nut -> sound-hole-centre distance.
 # Steel-string (14-fret neck, ~645 mm) and classical (12-fret, ~650 mm) guitars
@@ -60,6 +63,7 @@ class HandFrame:
     hands: list  # list of (21, 2) arrays in normalised image coords
     fret_pos: float | None = None
     fret_conf: float = 0.0
+    nut_source: str | None = None  # "headstock" or "neck-end"
     fretting: int | None = None  # index into hands
     picking: int | None = None
     axis: list | None = None  # [nut_x, nut_y, hole_x, hole_y] normalised
@@ -284,6 +288,7 @@ def analyse_geometry(frames: list[HandFrame], shots: list[Shot]) -> None:
             if along > hand_along * 0.9 and perp < 0.25 * along:
                 nut = _segment_point(hb, body)
                 nut_conf, head_c = min(1.0, s * 3) * (1 - perp / (0.25 * along)) ** 0.5, hc
+                fr.nut_source = "headstock"
                 break
         if nut is None and neck is not None:
             far = _segment_point(neck[1], body + u * 4 * max(W, H))
@@ -291,6 +296,7 @@ def analyse_geometry(frames: list[HandFrame], shots: list[Shot]) -> None:
             at_border = min(x0, y0) < 4 or x1 > W - 4 or y1 > H - 4
             if not at_border and np.dot(far - body, u) > hand_along:
                 nut, nut_conf, head_c = far, 0.35 * min(1.0, neck[0] * 3), far
+                fr.nut_source = "neck-end"  # with a capo, the visible neck often ends at the capo
         tip = head_c if head_c is not None else body + u * hand_along * 1.3
         fr.axis = [float(x) for x in (body[0] / W, body[1] / H, tip[0] / W, tip[1] / H)]
 
@@ -298,7 +304,7 @@ def analyse_geometry(frames: list[HandFrame], shots: list[Shot]) -> None:
             hole_to_nut = np.dot(nut - body, u)
             if hole_to_nut > 30:
                 # index fingertip & index MCP average: where the hand sits on the neck
-                p = hands_px[fret_i][[5, 6, 8]].mean(axis=0)
+                p = hands_px[fret_i][PRESS_LANDMARKS].mean(axis=0)
                 d_from_nut = (hole_to_nut - np.dot(p - body, u)) / hole_to_nut * NUT_TO_SOUNDHOLE_MM
                 if -40 < d_from_nut < 420:
                     fr.fret_pos = float(np.clip(_fret_from_distance(max(0.0, d_from_nut)), 0, 15))
@@ -319,7 +325,8 @@ def smooth_positions(frames: list[HandFrame], window: float = 0.6) -> None:
     for i, f in enumerate(frames):
         if f.fret_pos is None:
             continue
-        m = (np.abs(ts - f.t) <= window / 2) & ~np.isnan(vals)
+        same = np.array([g.nut_source == f.nut_source for g in frames])  # same reference point only
+        m = (np.abs(ts - f.t) <= window / 2) & ~np.isnan(vals) & same
         if m.sum() >= 2:
             f.fret_pos = float(np.median(vals[m]))
 
@@ -340,22 +347,36 @@ def picking_velocity(frames: list[HandFrame]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def position_prior(frames: list[HandFrame]):
-    """Return a function t -> (fret_pos, confidence) or (None, 0)."""
-    pts = [(f.t, f.fret_pos, f.fret_conf) for f in frames if f.fret_pos is not None]
+    """Return a function t -> (fret_pos, confidence, nut_source) or (None, 0, None).
+
+    nut_source tells how to read fret_pos with a capo: measured from the headstock it is an
+    absolute fret; measured from where the visible neck ends it is usually relative to the
+    capo (the capo hides the neck beyond it). The fingering converts accordingly.
+    """
+    pts = [(f.t, f.fret_pos, f.fret_conf, f.nut_source) for f in frames if f.fret_pos is not None]
     if not pts:
-        return lambda t: (None, 0.0)
+        return lambda t: (None, 0.0, None)
     ts = np.array([p[0] for p in pts])
 
     def prior(t: float):
         i = int(np.argmin(np.abs(ts - t)))
         if abs(ts[i] - t) > 0.25:
-            return None, 0.0
-        return pts[i][1], pts[i][2]
+            return None, 0.0, None
+        return pts[i][1], pts[i][2], pts[i][3]
 
     return prior
 
 
-def export_overlay(frames: list[HandFrame]) -> list[dict]:
+def absolute_fret(pos: float | None, source: str | None, capo: int) -> float | None:
+    """Video estimate -> absolute fret, None when it would sit behind the capo (impossible)."""
+    if pos is None:
+        return None
+    if capo and source == "neck-end":
+        pos = pos + capo
+    return pos if pos >= capo - 0.5 else None
+
+
+def export_overlay(frames: list[HandFrame], capo: int = 0) -> list[dict]:
     """Compact per-frame hand skeletons for drawing over the video in the player."""
     out = []
     for f in frames:
@@ -367,7 +388,7 @@ def export_overlay(frames: list[HandFrame]) -> list[dict]:
                 "h": [[round(float(v), 4) for v in h.flatten()] for h in f.hands],
                 "f": f.fretting,
                 "p": f.picking,
-                "pos": None if f.fret_pos is None else round(f.fret_pos, 1),
+                "pos": None if (a := absolute_fret(f.fret_pos, f.nut_source, capo)) is None else round(a, 1),
                 "ax": None if f.axis is None else [round(v, 4) for v in f.axis],
             }
         )
