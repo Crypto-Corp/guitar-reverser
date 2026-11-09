@@ -97,8 +97,33 @@ def retune(y: np.ndarray, sr: int, offset_semitones: float) -> tuple[np.ndarray,
 # ------------------------------------------------------------------ transcription
 
 
-def transcribe(audio_path: Path, time_scale: float = 1.0, *, onset=0.45, frame=0.28, min_ms=60.0):
-    """Run Basic Pitch. Returns (notes, posteriorgram (T x 88), frame_times)."""
+def _pkg_resources_shim() -> None:
+    """resampy (a Basic Pitch dependency) still imports pkg_resources, which setuptools>=81
+    no longer ships. It only needs resource_filename: provide it via importlib."""
+    import importlib.util
+    import sys
+
+    if "pkg_resources" in sys.modules or importlib.util.find_spec("pkg_resources") is not None:
+        return
+    import types
+    from importlib import resources
+
+    mod = types.ModuleType("pkg_resources")
+    mod.resource_filename = lambda pkg, name: str(resources.files(pkg).joinpath(name))  # type: ignore[attr-defined]
+    sys.modules["pkg_resources"] = mod
+
+
+# Bump when transcription settings change: cached analyses with another version are redone.
+TRANSCRIBE_VERSION = "basic-pitch:on0.55:fr0.42:min60:nomelodia"
+
+
+def transcribe(audio_path: Path, time_scale: float = 1.0, *, onset=0.55, frame=0.42, min_ms=60.0, melodia=False):
+    """Run Basic Pitch. Returns (notes, posteriorgram (T x 88), frame_times).
+
+    Thresholds fitted on GuitarSet players 00-02 (note F1 on players 03-05: 72.4 -> 79.0 %;
+    the old values were 0.45 / 0.28 with the Melodia trick).
+    """
+    _pkg_resources_shim()
     from basic_pitch import ICASSP_2022_MODEL_PATH
     from basic_pitch.inference import Model, predict
     from basic_pitch.note_creation import model_frames_to_time
@@ -113,7 +138,7 @@ def transcribe(audio_path: Path, time_scale: float = 1.0, *, onset=0.45, frame=0
         minimum_frequency=70.0,
         maximum_frequency=1400.0,
         multiple_pitch_bends=False,
-        melodia_trick=True,
+        melodia_trick=melodia,
     )
     notes = [Note(s * time_scale, e * time_scale, int(p), float(a)) for s, e, p, a, *_ in events]
     notes.sort(key=lambda n: (n.start, n.pitch))
@@ -204,6 +229,7 @@ class BeatGrid:
     tempo: float
     meter: int  # beats per bar
     downbeat_offset: int  # index of the first downbeat in `beats`
+    source: str = "librosa"  # "beat_this" when the neural tracker supplied beats + downbeats
 
     def bar_starts(self) -> np.ndarray:
         return self.beats[self.downbeat_offset :: self.meter]
@@ -217,7 +243,47 @@ class BeatGrid:
         }
 
 
+def _beat_this(y: np.ndarray, sr: int) -> BeatGrid | None:
+    """Beats + downbeats from beat_this (Foscarin et al., ISMIR 2024) when it is installed.
+
+    Optional dependency: `uv pip install --python .venv/bin/python beat-this`.
+    Any failure (not installed, no weights, API change) falls back to librosa.
+    """
+    try:
+        import torch
+        from beat_this.inference import Audio2Beats
+    except Exception:
+        return None
+    try:
+        device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            a2b = Audio2Beats(checkpoint_path="final0", device=device, dbn=False)
+        except Exception:
+            a2b = Audio2Beats(checkpoint_path="final0", device="cpu", dbn=False)
+        beats, downbeats = a2b(y.astype(np.float32), sr)
+        beats, downbeats = np.asarray(beats, float), np.asarray(downbeats, float)
+        if len(beats) < 8:
+            return None
+        tempo = 60.0 / float(np.median(np.diff(beats)))
+        # downbeats -> meter and phase: index of each downbeat among the beats
+        idx = [int(np.argmin(np.abs(beats - d))) for d in downbeats]
+        gaps = np.diff(idx)
+        meter = int(np.bincount(gaps[(gaps >= 2) & (gaps <= 7)]).argmax()) if len(gaps) and ((gaps >= 2) & (gaps <= 7)).any() else 4
+        offset = int(np.bincount([i % meter for i in idx]).argmax()) if idx else 0
+        return BeatGrid(beats=beats, tempo=tempo, meter=meter, downbeat_offset=offset, source="beat_this")
+    except Exception as e:  # pragma: no cover - depends on an optional package
+        log.warning("beat_this failed (%s); using librosa", e)
+        return None
+
+
 def track_beats(y: np.ndarray, sr: int, start: float = 0.0, end: float | None = None) -> BeatGrid:
+    grid = _beat_this(y, sr)
+    if grid is not None:
+        keep = (grid.beats >= start - 0.5) & ((end is None) | (grid.beats <= (end or 0) + 0.5))
+        first = int(np.argmax(keep)) if keep.any() else 0
+        grid.beats = grid.beats[keep]
+        grid.downbeat_offset = (grid.downbeat_offset - first) % grid.meter
+        return grid
     import librosa
 
     hop = 256
@@ -232,10 +298,90 @@ def track_beats(y: np.ndarray, sr: int, start: float = 0.0, end: float | None = 
     return BeatGrid(beats=beats, tempo=tempo, meter=4, downbeat_offset=0)
 
 
+def detect_click_track(y: np.ndarray, sr: int, span: tuple[float, float] | None = None) -> BeatGrid | None:
+    """A metronome in the recording is a ground-truth beat grid.
+
+    Looks for very regular, sharp transients (Demucs puts clicks in the drums stem).
+    Accepted only if >= 16 clicks with inter-onset intervals within ~4 % of each other,
+    covering most of the played span. Accented clicks (louder or brighter) give the downbeat.
+    """
+    import librosa
+
+    if y is None or len(y) < sr * 5 or float(np.max(np.abs(y))) < 1e-4:
+        return None
+    hop = 128
+    env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    if env.max() <= 0:
+        return None
+    peaks = librosa.util.peak_pick(env, pre_max=8, post_max=8, pre_avg=40, post_avg=40,
+                                   delta=0.25 * float(env.max()), wait=int(0.2 * sr / hop))
+    if len(peaks) < 16:
+        return None
+    t = librosa.frames_to_time(peaks, sr=sr, hop_length=hop)
+    ioi = np.diff(t)
+    period = float(np.median(ioi))
+    if not 0.25 <= period <= 1.6:
+        return None
+    # keep the longest run of clicks spaced by ~one period (allow a missed click = 2 periods)
+    ok = np.abs(ioi / period - np.round(ioi / period)) < 0.06
+    ok &= (np.round(ioi / period) >= 1) & (np.round(ioi / period) <= 2)
+    runs, cur = [], [0]
+    for i, good in enumerate(ok):
+        if good:
+            cur.append(i + 1)
+        else:
+            runs.append(cur)
+            cur = [i + 1]
+    runs.append(cur)
+    run = max(runs, key=len)
+    if len(run) < 16:
+        return None
+    tc = t[run]
+    k = np.round((tc - tc[0]) / period)
+    slope, icpt = np.polyfit(k, tc, 1)  # constant tempo fit
+    resid = tc - (slope * k + icpt)
+    if float(np.median(np.abs(resid))) > 0.02:
+        return None
+    s0, s1 = span if span else (0.0, len(y) / sr)
+    if (tc[-1] - tc[0]) < 0.5 * max(1e-6, s1 - s0):
+        return None
+    if 60.0 / slope > 160:  # eighth-note clicks / hi-hat: beat = every other click
+        beats_all = icpt + slope * np.arange(int(np.floor((min(s0, tc[0]) - icpt) / slope)),
+                                             int(np.ceil((max(s1, tc[-1]) - icpt) / slope)) + 1, 2)
+        beats_all = beats_all[(beats_all >= 0) & (beats_all <= len(y) / sr)]
+        return BeatGrid(beats=beats_all, tempo=30.0 / slope, meter=4, downbeat_offset=0, source="metronome")
+    n0 = int(np.floor((min(s0, tc[0]) - icpt) / slope))
+    n1 = int(np.ceil((max(s1, tc[-1]) - icpt) / slope))
+    beats = icpt + slope * np.arange(n0, n1 + 1)
+    beats = beats[(beats >= 0) & (beats <= len(y) / sr)]
+    # accents: brightness + level of each detected click
+    cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop)[0]
+    acc = np.array([env[peaks[i]] / env.max() + cent[min(len(cent) - 1, peaks[i])] / (cent.max() + 1e-9) for i in run])
+    best = (0.0, 4, 0)
+    for meter in (4, 3, 2, 6):
+        idx = (k - k.min()).astype(int)
+        for ph in range(meter):
+            on = acc[idx % meter == ph]
+            off = acc[idx % meter != ph]
+            if len(on) < 3 or len(off) < 3:
+                continue
+            gap = float(on.mean() - off.mean()) / (float(acc.std()) + 1e-9)
+            if gap > best[0] + (0.15 if meter in (2, 6) else 0.0):
+                best = (gap, meter, ph)
+    gap, meter, ph = best
+    if gap < 0.8:  # no clear accent: keep 4/4 and let chords/bass decide the phase
+        meter, ph, src = 4, 0, "metronome"
+    else:
+        src = "metronome+accent"
+    first_click_beat = int(round((tc[0] - beats[0]) / slope))
+    offset = (first_click_beat + ph) % meter
+    return BeatGrid(beats=beats, tempo=60.0 / slope, meter=meter, downbeat_offset=offset, source=src)
+
+
 def fit_meter_and_downbeat(grid: BeatGrid, chord_change_times: list[float], bass_onsets: list[float]) -> BeatGrid:
     """Chords change and bass notes land mostly on beat 1: pick meter/phase that agrees."""
-    if len(grid.beats) < 8:
-        return grid
+    if len(grid.beats) < 8 or grid.source in ("beat_this", "metronome+accent"):
+        return grid  # downbeats already known (neural tracker or accented metronome)
     b = grid.beats
 
     def nearest_beat(t):
@@ -258,10 +404,10 @@ def fit_meter_and_downbeat(grid: BeatGrid, chord_change_times: list[float], bass
     return BeatGrid(beats=b, tempo=grid.tempo, meter=meter, downbeat_offset=best_by_meter[meter][1])
 
 
-def key_from_chords(chords: list["ChordSeg"]) -> tuple[int, str, float]:
-    """Pick the key whose diatonic chords cover the most playing time (tonic favoured)."""
+def key_scores_from_chords(chords: list["ChordSeg"]) -> dict[tuple[int, str], float]:
+    """Score every key by how much playing time its diatonic chords cover (tonic favoured)."""
     total = sum(c.end - c.start for c in chords if c.root is not None) or 1.0
-    best = (0, "major", -1e9)
+    out = {}
     for mode in ("major", "minor"):
         for tonic in range(12):
             dia = theory.diatonic_chords(tonic, mode)
@@ -279,9 +425,32 @@ def key_from_chords(chords: list["ChordSeg"]) -> tuple[int, str, float]:
                     s += 0.1 * d
             if mode == "minor":
                 s -= 0.05 * total  # relative-major ties go to major
-            if s > best[2]:
-                best = (tonic, mode, s)
-    return best[0], best[1], best[2] / total
+            out[(tonic, mode)] = s / total
+    return out
+
+
+def estimate_key(notes: list[Note], draft_chords: list["ChordSeg"], span=None, w_notes: float = 2.0):
+    """Key from the note pitch-class profile (Krumhansl) plus the draft chords.
+
+    Chords alone confuse parallel keys when thirds are quiet (fingerstyle): C minor read as
+    C major. On GuitarSet the combination lifts key accuracy 68 -> 75 % on unseen players.
+    """
+    hist = np.zeros(12)
+    for n in notes:
+        if span is None or span[0] - 1 <= n.start <= span[1] + 1:
+            hist[n.pitch % 12] += (n.end - n.start) * n.amp
+    # sqrt-compress: otherwise the many tonic/fifth notes drown the thirds and sixths that
+    # tell major from minor (GuitarSet, unseen players: 72.8 -> 76.8 %)
+    prof = theory.key_profile_scores(np.sqrt(hist)) if hist.any() else {k: 0.0 for k in key_scores_from_chords([])}
+    csc = key_scores_from_chords(draft_chords)
+    (tonic, mode) = max(csc, key=lambda k: csc[k] + w_notes * prof[k])
+    return tonic, mode, csc[(tonic, mode)] + w_notes * prof[(tonic, mode)]
+
+
+def key_from_chords(chords: list["ChordSeg"]) -> tuple[int, str, float]:
+    sc = key_scores_from_chords(chords)
+    (tonic, mode), s = max(sc.items(), key=lambda kv: kv[1])
+    return tonic, mode, s
 
 
 # ---------------------------------------------------------------------- chords
@@ -305,6 +474,9 @@ class ChordSeg:
             "quality": self.quality,
             "confidence": round(self.confidence, 3),
         }
+
+
+KEY_BONUS = (0.04, 0.05)  # score bonus for chords in the key, penalty for chords outside it
 
 
 def _chord_templates():
@@ -381,11 +553,11 @@ def recognise_chords(
     quals = [q for _, q in labels]
     bass_root = Bn[:, roots]  # bass energy on each label's root
     score = sim + 0.35 * bass_root
-    seventh_pen = np.array([0.035 if q in ("7", "maj7", "m7") else 0.0 for q in quals])
+    seventh_pen = np.array([0.035 if q in ("7", "maj7", "m7") else (0.05 if q == "m7b5" else 0.0) for q in quals])
     score = score - seventh_pen
     if key is not None:
         dia = theory.diatonic_chords(*key)
-        score = score + np.array([0.07 if lab in dia else -0.09 for lab in labels])
+        score = score + np.array([KEY_BONUS[0] if lab in dia else -KEY_BONUS[1] for lab in labels])
 
     # Add a "no chord" state driven by guitar energy.
     thr = max(1e-6, float(np.percentile(E[E > 0], 20)) * 0.5) if (E > 0).any() else 1e-6
@@ -433,7 +605,7 @@ def analyse_harmony(post, times, grid: BeatGrid, et, en, span, notes: list[Note]
     s0, s1 = span
     draft = recognise_chords(post, times, grid.beats, et, en, None)
     draft = [c for c in draft if c.end > s0 and c.start < s1]
-    tonic, mode, key_r = key_from_chords(draft)
+    tonic, mode, key_r = estimate_key(notes, draft, span)
     chords = recognise_chords(post, times, grid.beats, et, en, (tonic, mode))
     chords = [c for c in chords if c.end > s0 - 1 and c.start < s1 + 1]
     bass_onsets = [n.start for n in notes if n.pitch < 52]

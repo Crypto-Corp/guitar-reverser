@@ -123,36 +123,85 @@ def _chord_voicings(seg: ChordSeg | None, capo: int):
     return vs[:3]
 
 
-def _unary(strings, frets, voicings, prior, n_notes):
+# Cost weights of the fingering model. Units are arbitrary; only ratios matter.
+# Fitted by coordinate search on GuitarSet players 00-02 (true notes) and checked on
+# players 03-05: string accuracy 67.2 % -> 76.0 % on the unseen players (solos 45 -> 60 %).
+# The fit removed the old "stay low on the neck" bias (pos, open = 0): real players don't.
+COSTS: dict[str, float] = {
+    "pos": 0.0,         # per fret of hand position (index finger): lower is easier
+    "span": 0.05,        # per fret between lowest and highest fretted note
+    "span_quad": 0.9,   # extra, quadratic, for stretches beyond 3 frets
+    "high": 0.25,        # per note above fret 12
+    "open": 0.0,        # bonus per open string (beginner friendly, rings)
+    "shape_hit": 0.55,   # note matches the current chord's standard shape
+    "shape_mute": 0.35,  # note on a string the shape mutes
+    "shape_miss": 0.2,   # note elsewhere on a string the shape uses
+    "shape_diff": 0.05,  # per difficulty point of that shape
+    "prior": 0.4,        # disagreement with the video's fret-position estimate
+    "shift": 0.5,       # per fret of hand shift (scaled up when fast)
+    "jump": 0.4,         # extra for a shift larger than `jump_at`
+    "jump_at": 4,
+    "ring": 0.3,         # cutting a note that is still ringing on that string
+    "anchor": 0.0,      # per fret between the index finger and the lowest fretted note
+    "box": 2,            # frets the hand covers above the index without shifting
+}
+_POP = np.array([bin(i).count("1") for i in range(64)], dtype=np.float64)
+
+
+def _anchors(frets) -> list[int | None]:
+    """Possible index-finger positions for a fingering (None = only open strings)."""
     fretted = [f for f in frets if f > 0]
-    pos = min(fretted) if fretted else None
+    if not fretted:
+        return [None]
+    lo, hi = min(fretted), max(fretted)
+    box = int(COSTS["box"])
+    if hi - lo >= box:
+        return [lo]
+    return list(range(max(1, hi - box), lo + 1))
+
+
+def _unary(strings, frets, voicings, prior, n_notes, anchor=None):
+    C = COSTS
+    fretted = [f for f in frets if f > 0]
+    lo = min(fretted) if fretted else None
+    pos = anchor if anchor is not None else lo
     span = (max(fretted) - min(fretted)) if fretted else 0
     c = 0.0
-    c += 0.07 * (pos or 0)
-    c += 0.12 * span + 0.45 * max(0, span - 3) ** 2
-    c += sum(0.25 for f in frets if f > 12)
-    # mild preference for open strings (beginner friendly, rings nicely)
-    c -= 0.04 * sum(1 for f in frets if f == 0)
+    c += C["pos"] * (pos or 0)
+    if lo is not None and pos is not None:
+        c += C["anchor"] * (lo - pos)
+    c += C["span"] * span + C["span_quad"] * max(0, span - 3) ** 2
+    c += C["high"] * sum(1 for f in frets if f > 12)
+    c -= C["open"] * sum(1 for f in frets if f == 0)
     if voicings:
         best = None
         for v in voicings:
             vc = 0.0
             for s, f in zip(strings, frets):
                 if v.frets[s] == f:
-                    vc -= 0.55
+                    vc -= C["shape_hit"]
                 elif v.frets[s] == -1:
-                    vc += 0.35
+                    vc += C["shape_mute"]
                 else:
-                    vc += 0.2
-            vc += 0.05 * v.difficulty()
+                    vc += C["shape_miss"]
+            vc += C["shape_diff"] * v.difficulty()
             best = vc if best is None else min(best, vc)
         c += best / max(1, n_notes) ** 0.5
     if prior is not None:
         p_pos, conf = prior
         if p_pos is not None and conf > 0:
             hp = pos if pos is not None else 1
-            c += conf * 0.4 * max(0.0, abs(hp - p_pos) - 1.5)
+            c += conf * C["prior"] * max(0.0, abs(hp - p_pos) - 1.5)
     return c, pos
+
+
+def _states(cands, keep, voicings, prior, extra=0.0):
+    out = []
+    for strings, frets in cands:
+        for a in _anchors(frets):
+            c, pos = _unary(strings, frets, voicings, prior, len(frets), a)
+            out.append(_State(frets, strings, pos, c + extra, keep))
+    return out
 
 
 def assign_fingering(
@@ -161,8 +210,9 @@ def assign_fingering(
     tuning: list[int] = theory.STANDARD_TUNING,
     capo: int = 0,
     prior_fn=None,
+    beam: int = 160,
 ) -> float:
-    """In-place Viterbi assignment. Returns the total path cost."""
+    """In-place Viterbi assignment over (fingering, hand position) states. Returns the path cost."""
     chord_starts = [c.start for c in chords]
 
     def chord_at(t):
@@ -175,6 +225,9 @@ def assign_fingering(
         ev.chord = seg.name if seg else "N"
         voicings = _chord_voicings(seg, capo)
         prior = prior_fn(ev.t) if prior_fn else None
+        if prior is not None and prior[0] is not None and capo:
+            # the video measures absolute frets; fingering frets count from the capo
+            prior = (max(0.0, prior[0] - capo), prior[1])
         ev.notes = [n for n in ev.notes if n.pitch - tuning[0] - capo >= 0]  # below the capo: unplayable
         pitches = [n.pitch for n in ev.notes]
         cands = _candidates(pitches, tuning, capo)
@@ -184,11 +237,8 @@ def assign_fingering(
             ev.notes.pop(drop)
             pitches = [n.pitch for n in ev.notes]
             cands = _candidates(pitches, tuning, capo)
-        states = []
         full = tuple(range(len(ev.notes)))
-        for strings, frets in cands:
-            c, pos = _unary(strings, frets, voicings, prior, len(frets))
-            states.append(_State(frets, strings, pos, c, full))
+        states = _states(cands, full, voicings, prior)
         # Robust decoding: the quietest note may be a ghost (harmonic, vocal bleed).
         # Offer states without it; dropping costs more the louder the note is.
         if ev.notes:
@@ -197,42 +247,48 @@ def assign_fingering(
             drop_cost = 0.5 + 2.2 * amp
             if len(ev.notes) >= 2:
                 sub = tuple(i for i in full if i != k)
-                for strings, frets in _candidates([ev.notes[i].pitch for i in sub], tuning, capo):
-                    c, pos = _unary(strings, frets, voicings, prior, len(frets))
-                    states.append(_State(frets, strings, pos, c + drop_cost, sub))
+                sub_c = _candidates([ev.notes[i].pitch for i in sub], tuning, capo)
+                states += _states(sub_c, sub, voicings, prior, drop_cost)
             elif amp < 0.35:
                 states.append(_State(tuple(), tuple(), None, drop_cost + 0.4, tuple()))
         states.sort(key=lambda s: s.cost)
-        layers.append(states[:80] or [_State(tuple(), tuple(), None, 5.0, tuple())])
+        layers.append(states[:beam] or [_State(tuple(), tuple(), None, 5.0, tuple())])
 
-    # Viterbi
-    INF = float("inf")
-    dp = [s.cost for s in layers[0]]
-    back: list[list[int]] = [[-1] * len(layers[0])]
+    if not layers:
+        assign_fingering.last_dropped = 0
+        return 0.0
+
+    # Vectorised Viterbi. Open-string-only states keep the previous hand position
+    # (`eff`), so an open note does not reset the hand.
+    C = COSTS
+    nan = float("nan")
+
+    def arrays(L):
+        pos = np.array([nan if s.pos is None else s.pos for s in L], dtype=np.float64)
+        cost = np.array([s.cost for s in L], dtype=np.float64)
+        mask = np.array([sum(1 << st for st in s.strings) for s in L], dtype=np.int64)
+        return pos, cost, mask
+
+    pos0, cost0, _ = arrays(layers[0])
+    dp, eff = cost0, pos0
+    back: list[np.ndarray] = [np.full(len(layers[0]), -1)]
     for k in range(1, len(layers)):
         prev_ev, ev = events[k - 1], events[k]
         gap = max(0.0, ev.t - prev_ev.t)
         speed = 1.0 / (gap + 0.12)
         ringing = {i for i, n in enumerate(prev_ev.notes) if n.end > ev.t + 0.06}
-        cur, bk = [], []
-        for s in layers[k]:
-            best, arg = INF, 0
-            for j, p in enumerate(layers[k - 1]):
-                t = 0.0
-                if s.pos is not None and p.pos is not None:
-                    t += 0.16 * abs(s.pos - p.pos) * speed ** 0.5
-                    if abs(s.pos - p.pos) > 4:
-                        t += 0.4
-                for slot, i in enumerate(p.keep):
-                    if i in ringing and p.strings[slot] in s.strings:
-                        t += 0.3
-                v = dp[j] + t
-                if v < best:
-                    best, arg = v, j
-            cur.append(best + s.cost)
-            bk.append(arg)
-        dp = cur
-        back.append(bk)
+        rmask = np.array([sum(1 << p.strings[slot] for slot, i in enumerate(p.keep) if i in ringing)
+                          for p in layers[k - 1]], dtype=np.int64)
+        pos, cost, mask = arrays(layers[k])
+        d = np.abs(pos[None, :] - eff[:, None])
+        d = np.where(np.isnan(d), 0.0, d)
+        trans = C["shift"] * d * speed ** 0.5 + C["jump"] * (d > C["jump_at"])
+        trans += C["ring"] * _POP[rmask[:, None] & mask[None, :]]
+        tot = dp[:, None] + trans
+        arg = np.argmin(tot, axis=0)
+        dp = tot[arg, np.arange(len(arg))] + cost
+        eff = np.where(np.isnan(pos), eff[arg], pos)
+        back.append(arg)
     # backtrack
     j = int(np.argmin(dp))
     total = float(dp[j])
@@ -246,7 +302,7 @@ def assign_fingering(
             n.string, n.fret = st, fr
         ev.notes = kept
         ev.hand_pos = s.pos or 0
-        j = back[k][j]
+        j = int(back[k][j])
     events[:] = [e for e in events if e.notes]
     _assign_fretting_fingers(events, chords, capo, chord_at)
     assign_fingering.last_dropped = dropped
@@ -273,8 +329,10 @@ def _assign_fretting_fingers(events, chords, capo, chord_at):
         fretted = [n.fret for n in ev.notes if n.fret > 0]
         if fretted:
             lo, hi = min(fretted), max(fretted)
-            if not (anchor <= lo and hi <= anchor + 3):
-                anchor = lo if hi - lo <= 3 else lo
+            if ev.hand_pos > 0 and ev.hand_pos <= lo and hi <= ev.hand_pos + 3:
+                anchor = ev.hand_pos  # index-finger position chosen by the Viterbi hand model
+            elif not (anchor <= lo and hi <= anchor + 3):
+                anchor = lo
         for n in ev.notes:
             n.finger = 0 if n.fret == 0 else int(np.clip(n.fret - anchor + 1, 1, 4))
 

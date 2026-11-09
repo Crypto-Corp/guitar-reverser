@@ -20,6 +20,10 @@ dependencies = [
     "mir_eval",
 ]
 
+[project.optional-dependencies]
+# neural beat + downbeat tracker, used automatically when installed
+beats = ["beat-this>=1.1"]
+
 [project.scripts]
 reverser = "reverser.cli:main"
 

@@ -101,11 +101,11 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
 
     # -------------------------------------------------------------- audio
     cache = work / "analysis.pkl"
-    if cache.exists() and not force:
-        A = pickle.load(open(cache, "rb"))
+    A = pickle.load(open(cache, "rb")) if cache.exists() and not force else {}
+    if A.get("tv") == audio.TRANSCRIBE_VERSION:
         print("→ Audio analysis (cached)")
     else:
-        A = {}
+        A = {"tv": audio.TRANSCRIBE_VERSION}
         with Step("Estimating tuning"):
             y, sr = audio.load_mono(guitar_wav)
             A["offset"] = audio.estimate_tuning(y, sr)
@@ -128,9 +128,18 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
     notes, clean_stats = audio.clean_notes(A["raw"], A["vocal_notes"])
     s0, s1 = A["span"]
     notes = [n for n in notes if s0 - 1.0 <= n.start <= s1 + 1.0]
+    grid0 = A["grid"]
+    drums = stem_dir / "drums.wav"
+    if drums.exists():
+        # a metronome (Demucs puts clicks in the drums stem) is a ground-truth beat grid
+        yd, dsr = audio.load_mono(drums, 22050)
+        click = audio.detect_click_track(yd, dsr, A["span"])
+        if click is not None:
+            grid0 = click
+            print(f"→ Metronome found: {click.tempo:.1f} BPM" + (f", {click.meter}/4 from accents" if click.source.endswith("accent") else ""))
     with Step("Recognising chords"):
         chords, (tonic, mode, key_r), grid = audio.analyse_harmony(
-            A["post"], A["times"], A["grid"], A["et"], A["en"], A["span"], notes)
+            A["post"], A["times"], grid0, A["et"], A["en"], A["span"], notes)
 
     # -------------------------------------------------------------- video
     prior_fn, vel_t, vel_v, overlay, vision_stats = None, None, None, [], {}
@@ -219,7 +228,7 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
                 "hasVideo": is_video,
                 "noteStats": clean_stats,
                 "vision": vision_stats,
-                "pipeline": ["demucs:" + demucs_model, "basic-pitch", "librosa-beats", "chord-hmm",
+                "pipeline": ["demucs:" + demucs_model, "basic-pitch", f"{grid.source}-beats", "chord-hmm",
                              "owlv2" if overlay else None, "mediapipe-hands" if overlay else None, "viterbi-fingering"],
             },
             "media": {

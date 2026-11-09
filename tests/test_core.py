@@ -82,3 +82,22 @@ def test_replucked_notes_are_not_merged_but_decay_fragments_are():
     notes = [Note(0.0, 0.50, 60, 0.8), Note(0.51, 1.0, 60, 0.3)]
     kept, _ = clean_notes(notes)
     assert len(kept) == 1 and kept[0].end == 1.0
+
+
+def test_metronome_click_track_gives_tempo_meter_and_downbeat():
+    import numpy as np
+
+    from reverser.audio import detect_click_track
+
+    sr, bpm = 22050, 96
+    rng = np.random.default_rng(0)
+    y = (rng.standard_normal(sr * 40) * 0.003).astype(np.float32)
+    tt = np.arange(int(0.03 * sr)) / sr
+    for i, t in enumerate(np.arange(1.3, 39.5, 60 / bpm)):
+        accent = i % 3 == 0  # 3/4 with an accented first beat
+        n = int(t * sr)
+        y[n:n + len(tt)] += (1.0 if accent else 0.6) * np.sin(2 * np.pi * (1600 if accent else 1000) * tt) * np.exp(-tt * 120)
+    g = detect_click_track(y, sr)
+    assert g is not None and abs(g.tempo - bpm) < 0.5 and g.meter == 3
+    assert abs(g.beats[g.downbeat_offset] - 1.3) < 0.03
+    assert detect_click_track((rng.standard_normal(sr * 20) * 0.1).astype(np.float32), sr) is None

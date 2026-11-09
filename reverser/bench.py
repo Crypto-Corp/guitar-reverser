@@ -36,7 +36,7 @@ from . import audio, fingering, theory
 from .audio import ChordSeg, Note
 
 NAME_RE = re.compile(r"^(\d\d)_([A-Za-z]+)(\d)-(\d+)-([A-G][b#]?)_(comp|solo)$")
-HARTE_Q = {"": "maj", "m": "min", "7": "7", "maj7": "maj7", "m7": "min7"}
+HARTE_Q = {"": "maj", "m": "min", "7": "7", "maj7": "maj7", "m7": "min7", "m7b5": "hdim7"}
 STYLE_NAMES = {"BN": "Bossa nova", "Funk": "Funk", "Jazz": "Jazz", "Rock": "Rock", "SS": "Singer-songwriter"}
 
 
@@ -98,7 +98,9 @@ def load_reference(jams_path: Path) -> Reference:
 def analyse_audio(wav: Path, cache: Path) -> dict:
     """Audio models, cached. Mirrors pipeline.run (no stem separation: GuitarSet is solo guitar)."""
     if cache.exists():
-        return pickle.loads(cache.read_bytes())
+        A = pickle.loads(cache.read_bytes())
+        if A.get("tv") == audio.TRANSCRIBE_VERSION:
+            return A
     import contextlib
     import io
 
@@ -118,6 +120,7 @@ def analyse_audio(wav: Path, cache: Path) -> dict:
     et, en = audio.guitar_energy(y, sr)
     dur = len(y) / sr
     A = {
+        "tv": audio.TRANSCRIBE_VERSION,
         "offset": offset,
         "raw": [(n.start, n.end, n.pitch, n.amp) for n in raw],
         "post": post.astype(np.float16),
@@ -347,7 +350,11 @@ def run(root: Path, limit: int | None = None, jobs: int | None = None, players: 
     cache_dir = root / "cache"
     cache_dir.mkdir(exist_ok=True)
     t0 = time.time()
-    todo = [p for p in ann if not (cache_dir / f"{p.stem}.pkl").exists()]
+    def fresh(p):
+        c = cache_dir / f"{p.stem}.pkl"
+        return c.exists() and pickle.loads(c.read_bytes()).get("tv") == audio.TRANSCRIBE_VERSION
+
+    todo = [p for p in ann if not fresh(p)]
     for i, p in enumerate(todo):
         wav = root / "audio" / f"{p.stem}_mic.wav"
         analyse_audio(wav, cache_dir / f"{p.stem}.pkl")
