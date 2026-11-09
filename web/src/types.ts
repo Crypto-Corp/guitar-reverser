@@ -57,12 +57,15 @@ export interface HandFrame {
   ax: number[] | null;
 }
 
+export interface Pattern { style: string; cells: string[]; count: number; of?: number }
+
 export interface Section {
   label: string;
   startBar: number;
   endBar: number;
   repeats: number;
   chords: string[][];
+  pattern?: Pattern;
 }
 
 export interface Song {
@@ -95,7 +98,7 @@ export interface Song {
   chords: Chord[];
   barChords: string[][];
   sections: Section[];
-  pattern: { style: string; cells: string[]; count: number; of?: number };
+  pattern: Pattern;
   barPatterns: { bar: number; style: string; cells: string[]; picks: string[] }[];
   events: TabEvent[];
   easyEvents: TabEvent[];

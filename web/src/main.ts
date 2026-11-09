@@ -3,7 +3,7 @@ import { chordSVG } from "./chords";
 import { Fretboard3D } from "./fretboard3d";
 import { MediaEngine } from "./media";
 import { TabView } from "./tabview";
-import type { Chord, Mode, Song, TabEvent, Voicing } from "./types";
+import type { Chord, Mode, Pattern, Song, TabEvent, Voicing } from "./types";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
@@ -22,7 +22,8 @@ let song: Song | null = null;
 let base = "";
 let mode: Mode = (store.get("mode", "chords") as Mode);
 let events: TabEvent[] = [];
-let sectionTimes: { label: string; start: number; end: number }[] = [];
+let sectionTimes: { label: string; start: number; end: number; pattern?: Pattern }[] = [];
+let shownPattern: Pattern | null = null;
 
 tab.onSeek = (t) => engine.seek(t);
 
@@ -74,6 +75,7 @@ async function loadSong(slug: string) {
 
   const beatTime = (b: number) => s.beats[Math.max(0, Math.min(s.beats.length - 1, b))] ?? 0;
   sectionTimes = s.sections.map((sec) => ({
+    pattern: sec.pattern,
     label: sec.label,
     start: beatTime(s.downbeatOffset + sec.startBar * s.meta.meter),
     end: beatTime(s.downbeatOffset + sec.endBar * s.meta.meter),
@@ -119,7 +121,7 @@ function renderMeta(s: Song) {
     `<span class="pill">Key <b>${m.key}</b></span>`,
     `<span class="pill"><b>${m.tempo}</b> BPM · ${m.meter}/4</span>`,
     `<span class="pill ${m.capo ? "hot" : ""}">Capo <b>${m.capo || "none"}</b></span>`,
-    `<span class="pill">${m.style === "strum" ? "Strumming" : "Fingerstyle"}</span>`,
+    `<span class="pill" title="${m.style === "mixed" ? "Picked in some sections, strummed in others" : ""}">${m.style === "strum" ? "Strumming" : m.style === "mixed" ? "Picked + strummed" : "Fingerstyle"}</span>`,
     `<span class="pill">Tuning <b>${m.tuningOffsetCents > 0 ? "+" : ""}${m.tuningOffsetCents}¢</b></span>`,
   ];
   if (m.easyCapo !== m.capo) pills.push(`<span class="pill hot" title="Play open shapes with a capo">Easier: capo ${m.easyCapo}</span>`);
@@ -180,19 +182,26 @@ function renderInfo(s: Song) {
     <span title="Shortcuts">⌨ space play · ←/→ seek · L loop · 1/2/3 modes · −/+ speed</span>`;
 }
 
-function renderPattern(s: Song) {
-  if (mode === "chords" && s.pattern.style !== "strum") {
+/** Pattern of the section being played (falls back to the song's most common bar). */
+function patternAt(s: Song, now: number): Pattern {
+  const sec = sectionTimes.find((x) => x.start <= now && now < x.end);
+  return sec?.pattern && sec.pattern.cells.length ? sec.pattern : s.pattern;
+}
+
+function renderPattern(s: Song, p: Pattern = patternAt(s, engine.time)) {
+  shownPattern = p;
+  if (mode === "chords" && p.style !== "strum") {
     // Fingerpicked original: chord mode teaches an easy strum over the same chords.
     const cells = ["D", "-", "D", "U", "-", "U", "D", "U"].slice(0, s.meta.meter * 2);
     $("pattern-title").textContent = "Beginner strum (simplified)";
     $("pattern").style.gridTemplateColumns = `repeat(${cells.length}, 1fr)`;
     $("pattern").innerHTML = cells.map((c, i) => `<div class="cell ${c === "-" ? "" : c}" data-i="${i}">${c === "D" ? "↓" : c === "U" ? "↑" : "·"}<small>${i % 2 ? "&" : i / 2 + 1}</small></div>`).join("");
-    $("pattern-hint").innerHTML = `The original is <b>fingerpicked</b>. To start, strum these chords with this classic pattern. When you're ready, switch to <b>Easy tab</b> to learn the real picking.`;
+    $("pattern-hint").innerHTML = `This part is <b>fingerpicked</b>. To start, strum these chords with this classic pattern. When you're ready, switch to <b>Easy tab</b> to learn the real picking.`;
     return;
   }
-  const p = s.pattern;
   const fingerstyle = p.style !== "strum";
-  $("pattern-title").textContent = fingerstyle ? "Picking pattern (most common bar)" : "Strum pattern (most common bar)";
+  const where = s.sections.length > 1 ? "this section" : "most common bar";
+  $("pattern-title").textContent = fingerstyle ? `Picking pattern (${where})` : `Strum pattern (${where})`;
   const cells: string[] = p.cells.length ? p.cells : Array<string>(s.meta.meter * 2).fill("-");
   const counts = Array.from({ length: cells.length }, (_, i) => (i % 2 === 0 ? String(i / 2 + 1) : "&"));
   $("pattern").style.gridTemplateColumns = `repeat(${cells.length}, 1fr)`;
@@ -206,7 +215,9 @@ function renderPattern(s: Song) {
   }).join("");
   $("pattern-hint").innerHTML = fingerstyle
     ? `Numbers are strings (1 = high e … 6 = low E). Letters are picking fingers: <b style="color:#a78bfa">p</b> thumb (bass strings), <b style="color:#60a5fa">i</b> index, <b style="color:#34d399">m</b> middle, <b style="color:#fbbf24">a</b> ring. Close to this in ${p.count}/${p.of ?? "?"} bars.`
-    : `<b style="color:#22d3ee">↓</b> down-strum, <b style="color:#fb923c">↑</b> up-strum. Keep your hand moving down on the beats and up on the "&" even when you skip a strum. Found in ${p.count}/${p.of ?? "?"} bars.`;
+    : cells.includes("U")
+      ? `<b style="color:#22d3ee">↓</b> down-strum, <b style="color:#fb923c">↑</b> up-strum. Keep your hand moving down on the beats and up on the "&" even when you skip a strum. Found in ${p.count}/${p.of ?? "?"} bars.`
+      : `All <b style="color:#22d3ee">↓</b> down-strums: lift the pick back up without touching the strings. Found in ${p.count}/${p.of ?? "?"} bars.`;
 }
 
 function chordAt(t: number): { cur: Chord | null; next: Chord | null } {
@@ -243,6 +254,9 @@ function updatePanels(now: number) {
     const span = Math.max(0.5, next.start - (cur?.start ?? now));
     $("next-in").innerHTML = `change in ${dt.toFixed(1)}s<div class="next-bar"><div style="width:${Math.max(0, 100 - (100 * dt) / span)}%"></div></div>`;
   } else $("next-in").textContent = "";
+  // pattern of the current section (verses picked, chorus strummed…)
+  const pat = patternAt(song, now);
+  if (pat !== shownPattern) renderPattern(song, pat);
   // pattern cursor
   const b = beatIndex(now);
   const cellIdx = Math.floor(((b - song.downbeatOffset) % song.meta.meter + song.meta.meter) % song.meta.meter * 2);
