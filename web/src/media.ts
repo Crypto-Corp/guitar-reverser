@@ -16,6 +16,8 @@ export class MediaEngine {
   loop: [number, number] | null = null;
   ctx: AudioContext | null = null;
   synthGain: GainNode | null = null;
+  master: GainNode | null = null;
+  muted = false;
   clickGain: GainNode | null = null;
   synthOn = false;
   clickOn = false;
@@ -73,19 +75,40 @@ export class MediaEngine {
 
   private ensureCtx() {
     if (!this.ctx) {
-      this.ctx = new AudioContext();
-      this.synthGain = this.ctx.createGain();
+      const ctx = (this.ctx = new AudioContext());
+      this.master = ctx.createGain();
+      this.master.gain.value = this.muted ? 0 : 1;
+      this.master.connect(ctx.destination);
+      // simulation voice: strings -> guitar-body resonances -> soft compressor
+      this.synthGain = ctx.createGain();
       this.synthGain.gain.value = 0.55;
-      this.synthGain.connect(this.ctx.destination);
-      this.clickGain = this.ctx.createGain();
+      const body1 = ctx.createBiquadFilter();
+      body1.type = "peaking"; body1.frequency.value = 110; body1.Q.value = 1.2; body1.gain.value = 5;
+      const body2 = ctx.createBiquadFilter();
+      body2.type = "peaking"; body2.frequency.value = 230; body2.Q.value = 1.5; body2.gain.value = 3;
+      const top = ctx.createBiquadFilter();
+      top.type = "lowpass"; top.frequency.value = 4200; top.Q.value = 0.5;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -16; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.2;
+      this.synthGain.connect(body1).connect(body2).connect(top).connect(comp).connect(this.master);
+      this.clickGain = ctx.createGain();
       this.clickGain.gain.value = 0.35;
-      this.clickGain.connect(this.ctx.destination);
+      this.clickGain.connect(this.master);
     }
     if (this.ctx.state === "suspended") this.ctx.resume();
   }
 
+  /** Master mute: the recording and everything the simulation plays. */
+  setMuted(m: boolean) {
+    this.muted = m;
+    this.guitar.muted = m;
+    this.backing.muted = m;
+    if (this.master && this.ctx) this.master.gain.setTargetAtTime(m ? 0 : 1, this.ctx.currentTime, 0.015);
+  }
+
   async play() {
     this.ensureCtx();
+    this.synthGain!.gain.value = this.synthOn ? this.synthVol : 0;
     this.scheduledUntil = this.time;
     const ps = [this.guitar.play(), this.backing.play()];
     if (this.video) this.video.play().catch(() => {});
@@ -125,11 +148,14 @@ export class MediaEngine {
   }
 
   setSynth(on: boolean, vol = 0.55) {
+    const turnedOn = on && !this.synthOn;
     this.synthOn = on;
-    this.ensureCtx();
-    this.synthGain!.gain.value = vol;
-    this.scheduledUntil = this.time;
+    this.synthVol = vol;
+    // the AudioContext may only start after a user gesture: create it lazily on play
+    if (this.ctx && this.synthGain) this.synthGain.gain.setTargetAtTime(on ? vol : 0, this.ctx.currentTime, 0.02);
+    if (turnedOn) this.scheduledUntil = this.time;
   }
+  private synthVol = 0.55;
 
   setClick(on: boolean) {
     this.clickOn = on;

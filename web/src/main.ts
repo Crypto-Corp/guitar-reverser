@@ -372,11 +372,36 @@ speed.oninput = () => {
   engine.setRate(parseFloat(speed.value));
   $("speed-val").textContent = `${Math.round(parseFloat(speed.value) * 100)}%`;
 };
+// ---------------------------------------------------------------- sound
+// Original recording (two stems) + the simulation's own sound (synth playing the
+// notes on screen) + a master mute. Choices are remembered.
 const vg = $("vol-guitar") as HTMLInputElement, vb = $("vol-backing") as HTMLInputElement;
-const applyVol = () => engine.setVolumes(parseFloat(vg.value), parseFloat(vb.value));
-vg.oninput = vb.oninput = applyVol;
-applyVol();
-($("synth") as HTMLInputElement).onchange = (e) => engine.setSynth((e.target as HTMLInputElement).checked);
+const vs = $("vol-synth") as HTMLInputElement;
+vg.value = store.get("volGuitar", vg.value);
+vb.value = store.get("volBacking", vb.value);
+vs.value = store.get("volSynth", vs.value);
+let simOn = store.get("sim", "1") === "1";
+let muted = store.get("muted", "0") === "1";
+const applySound = () => {
+  engine.setVolumes(parseFloat(vg.value), parseFloat(vb.value));
+  engine.setSynth(simOn, parseFloat(vs.value));
+  engine.setMuted(muted);
+  const sb = $("synth"), mb = $("mute");
+  sb.classList.toggle("on", simOn);
+  sb.setAttribute("aria-pressed", String(simOn));
+  vs.disabled = !simOn;
+  mb.textContent = muted ? "🔇" : "🔊";
+  mb.classList.toggle("on", muted);
+  mb.setAttribute("aria-pressed", String(muted));
+  store.set("volGuitar", vg.value); store.set("volBacking", vb.value); store.set("volSynth", vs.value);
+  store.set("sim", simOn ? "1" : "0"); store.set("muted", muted ? "1" : "0");
+};
+const toggleSim = () => { simOn = !simOn; applySound(); };
+const toggleMute = () => { muted = !muted; applySound(); };
+vg.oninput = vb.oninput = vs.oninput = applySound;
+$("synth").onclick = toggleSim;
+$("mute").onclick = toggleMute;
+applySound();
 ($("click") as HTMLInputElement).onchange = (e) => engine.setClick((e.target as HTMLInputElement).checked);
 engine.on(() => ($("play").textContent = engine.playing ? "❚❚" : "▶"));
 
@@ -386,6 +411,8 @@ window.addEventListener("keydown", (e) => {
   else if (e.code === "ArrowLeft") engine.seek(engine.time - 5);
   else if (e.code === "ArrowRight") engine.seek(engine.time + 5);
   else if (e.key === "l" || e.key === "L") toggleLoop();
+  else if (e.key === "m" || e.key === "M") toggleMute();
+  else if (e.key === "s" || e.key === "S") toggleSim();
   else if (e.key === "1") setMode("chords");
   else if (e.key === "2") setMode("easy");
   else if (e.key === "3") setMode("full");

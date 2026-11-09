@@ -139,3 +139,15 @@ button, select, input { font: inherit; color: inherit; }
   .transport { gap: 8px; padding: 8px 12px; }
   .clock { min-width: 0; }
 }
+
+/* sound mixer */
+.mixer { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.mixer .ctl input[type=range], .mixer > input[type=range] { width: 70px; accent-color: var(--accent); }
+.mixer > input[type=range]:disabled { opacity: .35; }
+.mix-label { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 700; }
+.transport .mixer button { padding: 4px 10px; }
+.transport .mixer button.icon { font-size: 16px; padding: 3px 8px; }
+.transport .mixer button.icon.on { border-color: #b91c1c; color: #fca5a5; background: #2a1212; }
+.transport .mixer button.sim { color: var(--muted); }
+.transport .mixer button.sim.on { border-color: var(--accent2); color: var(--accent2); background: #0c2530; }
+@media (max-width: 640px) { .mixer { flex-wrap: wrap; } }

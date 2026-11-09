@@ -74,9 +74,14 @@
         <span id="clock" class="clock">0:00 / 0:00</span>
         <label class="ctl">Speed <input id="speed" type="range" min="0.4" max="1" step="0.05" value="1" /> <b id="speed-val">100%</b></label>
         <button id="loop" title="Loop the current section (L)">⟳ Loop section</button>
-        <label class="ctl">Guitar <input id="vol-guitar" type="range" min="0" max="1" step="0.05" value="1" /></label>
-        <label class="ctl">Voice &amp; rest <input id="vol-backing" type="range" min="0" max="1" step="0.05" value="0.8" /></label>
-        <label class="toggle"><input type="checkbox" id="synth" /> Tab synth</label>
+        <div class="mixer" role="group" aria-label="Sound">
+          <button id="mute" class="icon" title="Mute everything (M)" aria-pressed="false">🔊</button>
+          <span class="mix-label">Original</span>
+          <label class="ctl" title="Guitar stem of the recording">🎸 <input id="vol-guitar" type="range" min="0" max="1" step="0.05" value="1" aria-label="Original guitar volume" /></label>
+          <label class="ctl" title="Voice and everything else">🎤 <input id="vol-backing" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="Voice and rest volume" /></label>
+          <button id="synth" class="sim" title="The simulation plays the notes you see falling (S)" aria-pressed="true">♪ Simulation</button>
+          <input id="vol-synth" type="range" min="0" max="1" step="0.05" value="0.6" aria-label="Simulation volume" />
+        </div>
         <label class="toggle"><input type="checkbox" id="click" /> Metronome</label>
         <button id="countin" title="Count-in before playing">Count-in</button>
         <a id="dl-tab" class="dl" download>⬇ tab.txt</a>
