@@ -101,3 +101,38 @@ def test_metronome_click_track_gives_tempo_meter_and_downbeat():
     assert g is not None and abs(g.tempo - bpm) < 0.5 and g.meter == 3
     assert abs(g.beats[g.downbeat_offset] - 1.3) < 0.03
     assert detect_click_track((rng.standard_normal(sr * 20) * 0.1).astype(np.float32), sr) is None
+
+
+def test_count_in_marks_beat_one():
+    import numpy as np
+
+    from reverser.audio import detect_count_in
+
+    sr = 22050
+    rng = np.random.default_rng(1)
+    y = (rng.standard_normal(sr * 12) * 0.002).astype(np.float32)
+    tt = np.arange(int(0.03 * sr)) / sr
+    for t in (1.0, 1.65, 2.3, 2.95):  # "1, 2, 3, 4" at ~92 BPM
+        n = int(t * sr)
+        y[n:n + len(tt)] += np.sin(2 * np.pi * 1200 * tt) * np.exp(-tt * 120)
+    period, downbeat, n = detect_count_in(y, sr, music_start=3.62)
+    assert n == 4 and abs(period - 0.65) < 0.02 and abs(downbeat - 3.6) < 0.03
+    # clicks that keep going while the music plays are not a count-in
+    assert detect_count_in(y, sr, music_start=1.5) is None
+
+
+def test_strummed_bar_vs_fingerstyle_pinches():
+    from reverser.fingering import Event, classify_strums
+
+    def ev(t, strings, bar):
+        e = Event(t=t, notes=[Note(t, t + 0.3, 40 + 5 * s, 0.6, string=s) for s in strings])
+        e.bar = bar
+        return e
+
+    # bar 0: strums where only 2-3 adjacent strings are re-detected, many pitches ringing
+    strum_bar = [ev(0.5 * i, [2, 3, 4] if i % 2 else [3, 4], 0) for i in range(8)]
+    # bar 1: fingerstyle pinches (bass + melody far apart) and single notes
+    pick_bar = [ev(4 + 0.5 * i, [0, 4] if i % 2 == 0 else [3], 1) for i in range(8)]
+    sounding = lambda t: 5 if t < 4 else 3  # noqa: E731
+    out = classify_strums(strum_bar + pick_bar, sounding)
+    assert all(out[:8]) and not any(out[8:])

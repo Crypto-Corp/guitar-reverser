@@ -243,6 +243,16 @@ class BeatGrid:
         }
 
 
+_A2B = None  # beat_this model, loaded once
+
+
+def beat_backend() -> str:
+    """'beat_this' when the optional neural tracker is installed, else 'librosa'."""
+    import importlib.util
+
+    return "beat_this" if importlib.util.find_spec("beat_this") is not None else "librosa"
+
+
 def _beat_this(y: np.ndarray, sr: int) -> BeatGrid | None:
     """Beats + downbeats from beat_this (Foscarin et al., ISMIR 2024) when it is installed.
 
@@ -255,12 +265,14 @@ def _beat_this(y: np.ndarray, sr: int) -> BeatGrid | None:
     except Exception:
         return None
     try:
-        device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-        try:
-            a2b = Audio2Beats(checkpoint_path="final0", device=device, dbn=False)
-        except Exception:
-            a2b = Audio2Beats(checkpoint_path="final0", device="cpu", dbn=False)
-        beats, downbeats = a2b(y.astype(np.float32), sr)
+        global _A2B
+        if _A2B is None:
+            device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
+            try:
+                _A2B = Audio2Beats(checkpoint_path="final0", device=device, dbn=False)
+            except Exception:
+                _A2B = Audio2Beats(checkpoint_path="final0", device="cpu", dbn=False)
+        beats, downbeats = _A2B(y.astype(np.float32), sr)
         beats, downbeats = np.asarray(beats, float), np.asarray(downbeats, float)
         if len(beats) < 8:
             return None
@@ -376,6 +388,59 @@ def detect_click_track(y: np.ndarray, sr: int, span: tuple[float, float] | None 
     first_click_beat = int(round((tc[0] - beats[0]) / slope))
     offset = (first_click_beat + ph) % meter
     return BeatGrid(beats=beats, tempo=60.0 / slope, meter=meter, downbeat_offset=offset, source=src)
+
+
+def detect_count_in(y: np.ndarray, sr: int, music_start: float | None = None) -> tuple[float, float, int] | None:
+    """A count-in ("1, 2, 3, 4" clicks or sticks before the music) marks beat 1.
+
+    Looks for 3-8 equally spaced clicks in the first 15 s (Demucs puts them in the drums
+    stem). Returns (period, time of the first downbeat after the count-in, n clicks).
+    """
+    import librosa
+
+    if y is None or len(y) < sr * 2 or float(np.max(np.abs(y))) < 1e-4:
+        return None
+    hop = 128
+    head = y[: int(15 * sr)]
+    env = librosa.onset.onset_strength(y=head, sr=sr, hop_length=hop)
+    if env.max() <= 0:
+        return None
+    peaks = librosa.util.peak_pick(env, pre_max=8, post_max=8, pre_avg=40, post_avg=40,
+                                   delta=0.25 * float(env.max()), wait=int(0.2 * sr / hop))
+    t = librosa.frames_to_time(peaks, sr=sr, hop_length=hop)
+    if len(t) < 3:
+        return None
+    best = None
+    for i in range(len(t) - 2):
+        run = [t[i]]
+        period = t[i + 1] - t[i]
+        if not 0.3 <= period <= 1.5:
+            continue
+        for x in t[i + 1:]:
+            if abs((x - run[-1]) / period - 1) < 0.06:
+                run.append(x)
+            elif x - run[-1] > 1.5 * period:
+                break
+        if 3 <= len(run) <= 8 and (best is None or len(run) > len(best)):
+            best = run
+    if best is None:
+        return None
+    period = float(np.median(np.diff(best)))
+    downbeat = best[-1] + period
+    if music_start is not None and not (music_start - 2 * period <= downbeat <= music_start + 0.5 * period):
+        return None  # a count-in ends right where the music starts (not long before, not during it)
+    return period, float(downbeat), len(best)
+
+
+def apply_count_in(grid: BeatGrid, downbeat: float) -> BeatGrid:
+    """Re-phase bar lines so that the beat right after the count-in is beat 1."""
+    if not len(grid.beats):
+        return grid
+    i = int(np.argmin(np.abs(grid.beats - downbeat)))
+    if abs(grid.beats[i] - downbeat) > 0.2:
+        return grid
+    return BeatGrid(beats=grid.beats, tempo=grid.tempo, meter=grid.meter,
+                    downbeat_offset=i % grid.meter, source=grid.source + "+count-in")
 
 
 def fit_meter_and_downbeat(grid: BeatGrid, chord_change_times: list[float], bass_onsets: list[float]) -> BeatGrid:
@@ -611,6 +676,15 @@ def analyse_harmony(post, times, grid: BeatGrid, et, en, span, notes: list[Note]
     bass_onsets = [n.start for n in notes if n.pitch < 52]
     grid = fit_meter_and_downbeat(grid, [c.start for c in chords[1:]], bass_onsets)
     return chords, (tonic, mode, key_r), grid
+
+
+def sounding_counter(post: np.ndarray, times: np.ndarray, thr: float = 0.3):
+    """t -> number of pitches sounding 60-100 ms after t (posteriorgram above `thr`)."""
+    def count(t: float) -> int:
+        i = int(np.searchsorted(times, t + 0.06))
+        win = post[i:i + 3]
+        return int((win.max(axis=0) > thr).sum()) if len(win) else 0
+    return count
 
 
 def guitar_energy(y: np.ndarray, sr: int, hop: int = 1024) -> tuple[np.ndarray, np.ndarray]:

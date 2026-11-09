@@ -18,11 +18,8 @@ dependencies = [
     "pillow",
     "pretty_midi",
     "mir_eval",
+    "beat-this>=1.1",  # neural beats + downbeats (GuitarSet beat F 49 -> 79); librosa fallback
 ]
-
-[project.optional-dependencies]
-# neural beat + downbeat tracker, used automatically when installed
-beats = ["beat-this>=1.1"]
 
 [project.scripts]
 reverser = "reverser.cli:main"

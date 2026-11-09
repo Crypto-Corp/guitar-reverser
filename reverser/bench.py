@@ -100,6 +100,10 @@ def analyse_audio(wav: Path, cache: Path) -> dict:
     if cache.exists():
         A = pickle.loads(cache.read_bytes())
         if A.get("tv") == audio.TRANSCRIBE_VERSION:
+            if A["grid"].source != audio.beat_backend():
+                y, sr = audio.load_mono(wav)
+                A["grid"] = audio.track_beats(y, sr, 0.0, len(y) / sr)
+                cache.write_bytes(pickle.dumps(A))
             return A
     import contextlib
     import io
@@ -352,7 +356,10 @@ def run(root: Path, limit: int | None = None, jobs: int | None = None, players: 
     t0 = time.time()
     def fresh(p):
         c = cache_dir / f"{p.stem}.pkl"
-        return c.exists() and pickle.loads(c.read_bytes()).get("tv") == audio.TRANSCRIBE_VERSION
+        if not c.exists():
+            return False
+        A = pickle.loads(c.read_bytes())
+        return A.get("tv") == audio.TRANSCRIBE_VERSION and A["grid"].source == audio.beat_backend()
 
     todo = [p for p in ann if not fresh(p)]
     for i, p in enumerate(todo):

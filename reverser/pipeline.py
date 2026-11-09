@@ -124,6 +124,12 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
         with Step("Tracking beats"):
             A["grid"] = audio.track_beats(y, sr, *A["span"])
         pickle.dump(A, open(cache, "wb"))
+    if A["grid"].source != audio.beat_backend():
+        # a better beat tracker became available since this analysis was cached
+        with Step(f"Tracking beats ({audio.beat_backend()})"):
+            y, sr = audio.load_mono(guitar_wav)
+            A["grid"] = audio.track_beats(y, sr, *A["span"])
+        pickle.dump(A, open(cache, "wb"))
 
     notes, clean_stats = audio.clean_notes(A["raw"], A["vocal_notes"])
     s0, s1 = A["span"]
@@ -140,6 +146,11 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
     with Step("Recognising chords"):
         chords, (tonic, mode, key_r), grid = audio.analyse_harmony(
             A["post"], A["times"], grid0, A["et"], A["en"], A["span"], notes)
+        if drums.exists() and not grid.source.startswith("metronome"):
+            ci = audio.detect_count_in(yd, dsr, min((n.start for n in notes), default=None))
+            if ci is not None:
+                grid = audio.apply_count_in(grid, ci[1])
+                print(f"  count-in: {ci[2]} clicks, beat 1 at {ci[1]:.2f}s")
 
     # -------------------------------------------------------------- video
     prior_fn, vel_t, vel_v, overlay, vision_stats = None, None, None, [], {}
@@ -177,7 +188,7 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
         clean_stats["final"] = sum(len(e.notes) for e in events)
         arrange.quantise(events, grid)
         bf, tf = arrange.beat_function(grid), arrange.time_function(grid)
-        fingering.assign_picking(events, bf, vel_t, vel_v)
+        fingering.assign_picking(events, bf, vel_t, vel_v, audio.sounding_counter(A["post"], A["times"]))
 
     with Step("Arranging (bars, patterns, sections, easy tab)"):
         first_bar = min(e.bar for e in events) if events else 0
@@ -187,6 +198,13 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
         patterns = arrange.bar_patterns(events, grid)
         main_pattern = arrange.common_pattern([p for p in patterns if first_bar <= p["bar"] <= last_bar])
         sections = arrange.find_sections(rows, max(0, first_bar), last_bar)
+        # a song can be picked in the verses and strummed in the chorus: one pattern per section
+        for sec in sections:
+            sec["pattern"] = arrange.common_pattern(
+                [p for p in patterns if sec["startBar"] <= p["bar"] < sec["endBar"]])
+        styles = [p["style"] for p in patterns if first_bar <= p["bar"] <= last_bar and p["style"] != "rest"]
+        if styles and 0.25 <= styles.count("strum") / len(styles) <= 0.75:
+            main_pattern = dict(main_pattern, mixed=True)
         easy = arrange.easy_events(events, chords, grid, capo)
         cap_suggest, cap_rank = theory.suggest_capo(
             [(c.root, c.quality, c.end - c.start) for c in chords if c.root is not None])
@@ -224,7 +242,7 @@ def run(src: Path, out_root: Path, work_root: Path, *, title: str | None = None,
                 "meter": grid.meter,
                 "musicStart": round(s0, 2),
                 "musicEnd": round(s1, 2),
-                "style": main_pattern["style"],
+                "style": "mixed" if main_pattern.get("mixed") else main_pattern["style"],
                 "hasVideo": is_video,
                 "noteStats": clean_stats,
                 "vision": vision_stats,

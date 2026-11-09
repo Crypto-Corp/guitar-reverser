@@ -337,30 +337,82 @@ def _assign_fretting_fingers(events, chords, capo, chord_at):
             n.finger = 0 if n.fret == 0 else int(np.clip(n.fret - anchor + 1, 1, 4))
 
 
-def assign_picking(events: list[Event], beat_fn, vel_t=None, vel_v=None) -> None:
-    """Strum vs pluck, strum direction, and p/i/m/a fingers."""
-    for ev in events:
+def _looks_strummed(ev: Event, sounding_fn=None) -> bool:
+    strings = sorted(n.string for n in ev.notes)
+    if len(ev.notes) >= 4 and strings[-1] - strings[0] >= 3:
+        return True
+    # On a strum the transcriber often re-detects only 2-3 strings (the others keep
+    # ringing), but they are adjacent and many pitches sound together. A fingerstyle
+    # pinch is a bass + a melody note far apart.
+    if sounding_fn is not None and len(strings) >= 2 and strings[-1] - strings[0] == len(strings) - 1:
+        return sounding_fn(ev.t) >= 4
+    return False
+
+
+def classify_strums(events: list[Event], sounding_fn=None) -> list[bool]:
+    """Strum or pluck per event, smoothed per bar: a bar is strummed or picked as a whole.
+
+    On a lesson that switches from picked verses to a strummed chorus, the per-event rule
+    flags 6 % of picked events and 60 % of strummed ones; the bar vote cleans up the rest.
+    """
+    raw = [_looks_strummed(ev, sounding_fn) for ev in events]
+    if sounding_fn is None:
+        return raw
+    by_bar: dict[int, list[int]] = {}
+    for i, ev in enumerate(events):
+        by_bar.setdefault(ev.bar, []).append(i)
+    out = list(raw)
+    for bar, idx in by_bar.items():
+        if bar < 0 or len(idx) < 3:
+            continue
+        frac = sum(raw[i] for i in idx) / len(idx)
+        if frac >= 0.4:
+            for i in idx:
+                out[i] = True
+        elif frac < 0.2:
+            for i in idx:
+                out[i] = raw[i] and len(events[i].notes) >= 4
+    return out
+
+
+def assign_picking(events: list[Event], beat_fn, vel_t=None, vel_v=None, sounding_fn=None) -> None:
+    """Strum vs pluck, strum direction, and p/i/m/a fingers.
+
+    `sounding_fn(t)` -> number of pitches sounding just after t (from the posteriorgram);
+    without it only full, wide chords count as strums.
+    """
+    strummed = classify_strums(events, sounding_fn)
+    # bars whose strums fall on 16th positions use a 16th-note pendulum
+    n16: dict[int, int] = {}
+    for ev, st in zip(events, strummed):
+        if st:
+            f = beat_fn(ev.t) % 1.0
+            if min(abs(f - 0.25), abs(f - 0.75)) < 0.08:
+                n16[ev.bar] = n16.get(ev.bar, 0) + 1
+    bars16 = {b for b, c in n16.items() if c >= 2}
+    for ev, is_strum in zip(events, strummed):
         strings = sorted(n.string for n in ev.notes)
         spread = max(n.start for n in ev.notes) - min(n.start for n in ev.notes)
-        if len(ev.notes) >= 4 and strings[-1] - strings[0] >= 3:
+        if is_strum:
             ev.kind = "strum"
-            # direction from the order in which strings sound
+            # Direction. The pendulum rule (down on the beat, up on the "&"; in 16ths when the
+            # bar uses 16ths) matched 100 % of strums on a lesson's D-DU-UDU chorus; the string
+            # onset order only overrides it on clear evidence, the video wrist motion (65 %)
+            # is not used. Known miss: all-downstroke sections.
             d = None
-            if spread > 0.008:
+            if len(ev.notes) >= 4 and spread > 0.015:
                 ss = np.array([n.string for n in ev.notes], float)
                 ts = np.array([n.start for n in ev.notes], float)
                 if ss.std() > 0 and ts.std() > 0:
                     r = float(np.corrcoef(ss, ts)[0, 1])
-                    if abs(r) > 0.35:
+                    if abs(r) > 0.7:
                         d = "D" if r > 0 else "U"
-            if d is None and vel_t is not None and len(vel_t):
-                i = int(np.argmin(np.abs(vel_t - ev.t)))
-                if abs(vel_t[i] - ev.t) < 0.12 and abs(vel_v[i]) > 80:
-                    d = "D" if vel_v[i] > 0 else "U"
             if d is None:
-                b = beat_fn(ev.t)
-                frac = b - np.floor(b)
-                d = "U" if 0.3 < frac < 0.7 else "D"
+                frac = beat_fn(ev.t) % 1.0
+                if ev.bar in bars16:
+                    d = "D" if int(round(frac * 4)) % 2 == 0 else "U"
+                else:
+                    d = "D" if (frac < 0.25 or frac >= 0.75) else "U"
             ev.direction = d
             for n in ev.notes:
                 n.pluck = ""
