@@ -123,3 +123,19 @@ button, select, input { font: inherit; color: inherit; }
   .side > * { min-width: 260px; }
   #app { grid-template-rows: auto auto 170px 34px auto; height: auto; min-height: 100vh; }
 }
+
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; gap: 8px 10px; padding: 8px 12px; }
+  #song-select { flex: 1 1 0; min-width: 0; max-width: none; }
+  .meta { order: 3; width: 100%; gap: 6px; }
+  .spacer { display: none; }
+  #mode-seg { order: 4; width: 100%; }
+  #mode-seg button { flex: 1; }
+  .legend { display: none; }
+  .stage { grid-template-rows: minmax(260px, 48vh) auto; }
+  .side { flex-direction: column; overflow-x: visible; }
+  .side > * { min-width: 0; }
+  .now-chord { font-size: 34px; }
+  .transport { gap: 8px; padding: 8px 12px; }
+  .clock { min-width: 0; }
+}

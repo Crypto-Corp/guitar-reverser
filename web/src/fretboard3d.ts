@@ -194,14 +194,18 @@ export class Fretboard3D {
     }
   }
 
+  private fitZoom = 1;
+
   setView(v: View) {
     this.view = v;
-    const cx = fretX(3.6);
+    // Narrow (portrait) screens: centre on the first frets and pull back so the nut stays visible.
+    const a = this.camera.aspect || 1.8;
+    const k = (this.fitZoom = Math.min(1.9, Math.max(1, Math.pow(1.6 / a, 0.7))));
+    const cx = a < 1.2 ? fretX(2.6) : fretX(3.6);
     this.controls.target.set(cx, 2.0, 0);
     // ~48° elevation: strings are easy to separate and falling notes stay readable
-    if (v === "player") this.camera.position.set(cx, 13.0, 10.2);
-    else if (v === "teacher") this.camera.position.set(cx, 13.0, -10.2);
-    else this.camera.position.set(cx, 18, 0.01);
+    const off = v === "player" ? [0, 11.0, 10.2] : v === "teacher" ? [0, 11.0, -10.2] : [0, 16, 0.01];
+    this.camera.position.set(cx + off[0] * k, 2.0 + off[1] * k, off[2] * k);
     this.controls.update();
   }
 
@@ -217,6 +221,8 @@ export class Fretboard3D {
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
+    const k = Math.min(1.9, Math.max(1, Math.pow(1.6 / this.camera.aspect, 0.7)));
+    if (Math.abs(k - this.fitZoom) > 0.04) this.setView(this.view);
   }
 
   private label(i: number, text: string, color: string, pos: THREE.Vector3, size = 0.42) {

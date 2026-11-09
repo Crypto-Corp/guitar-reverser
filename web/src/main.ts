@@ -26,26 +26,41 @@ let sectionTimes: { label: string; start: number; end: number }[] = [];
 
 tab.onSeek = (t) => engine.seek(t);
 
-async function init() {
-  let idx: { songs: { slug: string; title: string }[] } = { songs: [] };
+type SongEntry = { slug: string; title: string; path?: string };
+let library: SongEntry[] = [];
+
+async function fetchIndex(url: string): Promise<SongEntry[]> {
   try {
-    idx = await (await fetch("songs/index.json", { cache: "no-store" })).json();
-  } catch { /* none */ }
-  if (!idx.songs?.length) {
+    const idx = await (await fetch(url, { cache: "no-store" })).json();
+    return Array.isArray(idx.songs) ? idx.songs : [];
+  } catch {
+    return [];
+  }
+}
+
+async function init() {
+  // your analysed songs first, then the bundled CC-licensed demo
+  library = [...(await fetchIndex("songs/index.json")), ...(await fetchIndex("demo/index.json"))];
+  if (!library.length) {
     $("empty").hidden = false;
     return;
   }
+  const q = new URLSearchParams(location.search);
   const sel = $("song-select") as HTMLSelectElement;
-  sel.innerHTML = idx.songs.map((s) => `<option value="${s.slug}">${escapeHtml(s.title)}</option>`).join("");
-  const want = new URLSearchParams(location.search).get("song") || store.get("song", idx.songs[0].slug);
-  sel.value = idx.songs.some((s) => s.slug === want) ? want : idx.songs[0].slug;
+  sel.innerHTML = library.map((s) => `<option value="${s.slug}">${escapeHtml(s.title)}</option>`).join("");
+  const want = q.get("song") || store.get("song", library[0].slug);
+  sel.value = library.some((s) => s.slug === want) ? want : library[0].slug;
   sel.onchange = () => loadSong(sel.value);
+  const m = q.get("mode");
+  if (m === "chords" || m === "easy" || m === "full") mode = m;
   await loadSong(sel.value);
+  const t = parseFloat(q.get("t") ?? "");
+  if (Number.isFinite(t)) engine.seek(t);
 }
 
 async function loadSong(slug: string) {
   store.set("song", slug);
-  base = `songs/${slug}`;
+  base = library.find((s) => s.slug === slug)?.path ?? `songs/${slug}`;
   song = await (await fetch(`${base}/song.json`, { cache: "no-store" })).json();
   const s = song!;
   await engine.load(base, s.media, s.media.video ? video : null);
@@ -343,7 +358,8 @@ document.querySelectorAll<HTMLButtonElement>("#view-seg button").forEach((b) => 
     document.querySelectorAll("#view-seg button").forEach((x) => x.classList.toggle("on", x === b));
   };
 });
-const savedView = store.get("view", "player");
+const urlView = new URLSearchParams(location.search).get("view");
+const savedView = urlView && ["player", "teacher", "top"].includes(urlView) ? urlView : store.get("view", "player");
 board.setView(savedView as any);
 document.querySelectorAll<HTMLButtonElement>("#view-seg button").forEach((x) => x.classList.toggle("on", x.dataset.view === savedView));
 
