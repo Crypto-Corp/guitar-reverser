@@ -119,10 +119,10 @@ Analysed songs stay on your machine: `web/public/songs/` and `work/` are git-ign
 - **Tab lane** under a fixed playhead: chord names, bar numbers, sustains, p/i/m/a or ↓/↑. Click or drag to seek; Ctrl+wheel zooms.
 - **Practice**: speed 40–100 % with pitch preserved, loop a section, count-in, metronome on the detected beats.
 - **Pattern of the current section**: the picking or strum pattern follows the song (picked verse, strummed chorus).
-- **Sound**: the simulation plays the notes you see falling (guitar-like synth, on by default, `S` to toggle). The original recording plays as two stems, *guitar* and *voice & rest*, each with its own volume: mute the guitar and play along. 🔊 / `M` mutes everything. Settings are remembered.
+- **Sound**: choose what you hear, **Recording · Both · Simulation** (`S` cycles), with one volume and 🔊 mute (`M`). *Simulation* is a plucked-string synth playing the notes you see falling, warm rather than metallic and exactly in tune. **Mix ▾** sets the recording's guitar, the voice and the simulated guitar separately; turn the recording's guitar down to play along. Settings are remembered.
 - **Video** with the hand-tracking overlay (fretting hand, picking hand, estimated fret).
 - **Deep links**: `?song=demo&mode=full&t=14&view=top`.
-- **Keys**: `space` play · `←/→` ±5 s · `L` loop · `M` mute · `S` simulation sound · `1/2/3` modes · `-/+` speed.
+- **Keys**: `space` play · `←/→` ±5 s · `L` loop · `M` mute · `S` recording / both / simulation · `1/2/3` modes · `-/+` speed.
 
 </td>
 </tr>

@@ -23,7 +23,7 @@ export class MediaEngine {
   clickOn = false;
   private scheduledUntil = 0;
   private lastTime = 0;
-  private ksCache = new Map<number, AudioBuffer>();
+  private ksCache = new Map<number, AudioBuffer>();  // key: midi * 4 + variant
   notes: { t: number; end: number; p: number; amp: number }[] = [];
   beats: number[] = [];
   downbeatOffset = 0;
@@ -86,11 +86,13 @@ export class MediaEngine {
       body1.type = "peaking"; body1.frequency.value = 110; body1.Q.value = 1.2; body1.gain.value = 5;
       const body2 = ctx.createBiquadFilter();
       body2.type = "peaking"; body2.frequency.value = 230; body2.Q.value = 1.5; body2.gain.value = 3;
+      const harsh = ctx.createBiquadFilter();
+      harsh.type = "peaking"; harsh.frequency.value = 2600; harsh.Q.value = 1.0; harsh.gain.value = -4;
       const top = ctx.createBiquadFilter();
-      top.type = "lowpass"; top.frequency.value = 4200; top.Q.value = 0.5;
+      top.type = "lowpass"; top.frequency.value = 3400; top.Q.value = 0.5;
       const comp = ctx.createDynamicsCompressor();
       comp.threshold.value = -16; comp.ratio.value = 4; comp.attack.value = 0.003; comp.release.value = 0.2;
-      this.synthGain.connect(body1).connect(body2).connect(top).connect(comp).connect(this.master);
+      this.synthGain.connect(body1).connect(body2).connect(harsh).connect(top).connect(comp).connect(this.master);
       this.clickGain = ctx.createGain();
       this.clickGain.gain.value = 0.35;
       this.clickGain.connect(this.master);
@@ -205,51 +207,93 @@ export class MediaEngine {
     this.scheduledUntil = to;
   }
 
-  private ks(midi: number): AudioBuffer {
-    const hit = this.ksCache.get(midi);
+  /**
+   * Plucked-string voice (extended Karplus-Strong), rendered once per pitch and cached.
+   * Warm rather than metallic: soft, velocity-dependent excitation with the pluck point
+   * modelled (comb), a 3-tap loss filter so high harmonics die fast, per-pitch decay
+   * (treble strings ring shorter) and a fractional all-pass delay for exact tuning.
+   */
+  private ks(midi: number, variant: number): AudioBuffer {
+    const key = midi * 4 + variant;
+    const hit = this.ksCache.get(key);
     if (hit) return hit;
     const ctx = this.ctx!;
     const sr = ctx.sampleRate;
     const f = 440 * Math.pow(2, (midi - 69) / 12);
-    const len = Math.floor(sr * 2.6);
+    const t60 = Math.max(1.6, Math.min(4.0, 4.0 - (midi - 40) * 0.06));
+    const len = Math.floor(sr * Math.min(4.2, t60 + 0.3));
     const buf = ctx.createBuffer(1, len, sr);
     const out = buf.getChannelData(0);
-    const N = Math.max(2, Math.round(sr / f));
-    const ring = new Float32Array(N);
-    // pluck position + slightly filtered noise burst
-    let prev = 0;
+
+    // delay line: period = N (line) + 1 (3-tap filter) + frac (all-pass)
+    const P = sr / f;
+    const N = Math.max(4, Math.floor(P - 1));
+    const frac = Math.max(0.05, Math.min(0.95, P - N - 1));
+    const C = (1 - frac) / (1 + frac);
+    const line = new Float32Array(N);
+
+    // excitation: low-passed noise (finger, not pick), pluck point at ~13 % of the string
+    let seed = 1234567 + key * 7919;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+    const exc = new Float32Array(N);
+    let lp = 0;
+    const bright = 0.35;
     for (let i = 0; i < N; i++) {
-      const r = Math.random() * 2 - 1;
-      prev = 0.6 * r + 0.4 * prev;
-      ring[i] = prev;
+      lp += bright * (rnd() - lp);
+      exc[i] = lp;
     }
-    const decay = 0.996 - Math.max(0, (midi - 40)) * 0.00004;
-    let idx = 0;
+    const M = Math.max(1, Math.round(0.13 * N));
+    let peak = 1e-9;
+    for (let i = 0; i < N; i++) {
+      line[i] = exc[i] - (i >= M ? exc[i - M] : 0);
+      peak = Math.max(peak, Math.abs(line[i]));
+    }
+    for (let i = 0; i < N; i++) line[i] /= peak;
+
+    // loss per period so the note decays by 60 dB in t60 seconds
+    const w = (2 * Math.PI * f) / sr;
+    const hMag = 0.5 + 0.5 * Math.cos(w); // |0.25 + 0.5 z^-1 + 0.25 z^-2| at f
+    const rho = Math.pow(10, -3 / (t60 * f)) / Math.max(0.5, hMag);
+    let x1 = 0, x2 = 0, apX = 0, apY = 0, idx = 0;
     for (let i = 0; i < len; i++) {
-      const a = ring[idx];
-      const b = ring[(idx + 1) % N];
-      const v = decay * 0.5 * (a + b);
-      ring[idx] = v;
-      out[i] = a;
-      idx = (idx + 1) % N;
+      const x = line[idx];
+      out[i] = x;
+      const y3 = 0.25 * x + 0.5 * x1 + 0.25 * x2;
+      x2 = x1;
+      x1 = x;
+      const ap = C * y3 + apX - C * apY;
+      apX = y3;
+      apY = ap;
+      line[idx] = Math.min(0.9999, rho) * ap;
+      idx = idx + 1 === N ? 0 : idx + 1;
     }
-    // soft attack de-click
-    for (let i = 0; i < 64; i++) out[i] *= i / 64;
-    this.ksCache.set(midi, buf);
+    // soft attack, then normalise
+    const att = Math.floor(sr * 0.002);
+    let mx = 1e-9;
+    for (let i = 0; i < len; i++) {
+      if (i < att) out[i] *= i / att;
+      mx = Math.max(mx, Math.abs(out[i]));
+    }
+    for (let i = 0; i < len; i++) out[i] *= 0.8 / mx;
+    this.ksCache.set(key, buf);
     return buf;
   }
 
   private pluck(midi: number, when: number, dur: number, amp: number) {
     const ctx = this.ctx!;
     const src = ctx.createBufferSource();
-    src.buffer = this.ks(midi);
+    src.buffer = this.ks(midi, Math.floor(Math.random() * 2));
+    // softer notes are also darker
+    const tone = ctx.createBiquadFilter();
+    tone.type = "lowpass";
+    tone.frequency.value = 1800 + 3200 * Math.min(1, amp);
     const g = ctx.createGain();
-    const peak = 0.25 + 0.5 * Math.min(1, amp);
+    const peak = 0.3 + 0.45 * Math.min(1, amp);
     g.gain.setValueAtTime(peak, when);
-    g.gain.setTargetAtTime(0, when + dur, 0.08);
-    src.connect(g).connect(this.synthGain!);
+    g.gain.setTargetAtTime(0, when + dur, 0.09);
+    src.connect(tone).connect(g).connect(this.synthGain!);
     src.start(Math.max(when, ctx.currentTime));
-    src.stop(when + dur + 0.6);
+    src.stop(when + dur + 0.7);
   }
 
   private click(when: number, accent: boolean) {

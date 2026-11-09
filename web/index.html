@@ -74,13 +74,23 @@
         <span id="clock" class="clock">0:00 / 0:00</span>
         <label class="ctl">Speed <input id="speed" type="range" min="0.4" max="1" step="0.05" value="1" /> <b id="speed-val">100%</b></label>
         <button id="loop" title="Loop the current section (L)">⟳ Loop section</button>
-        <div class="mixer" role="group" aria-label="Sound">
-          <button id="mute" class="icon" title="Mute everything (M)" aria-pressed="false">🔊</button>
-          <span class="mix-label">Original</span>
-          <label class="ctl" title="Guitar stem of the recording">🎸 <input id="vol-guitar" type="range" min="0" max="1" step="0.05" value="1" aria-label="Original guitar volume" /></label>
-          <label class="ctl" title="Voice and everything else">🎤 <input id="vol-backing" type="range" min="0" max="1" step="0.05" value="0.8" aria-label="Voice and rest volume" /></label>
-          <button id="synth" class="sim" title="The simulation plays the notes you see falling (S)" aria-pressed="true">♪ Simulation</button>
-          <input id="vol-synth" type="range" min="0" max="1" step="0.05" value="0.6" aria-label="Simulation volume" />
+        <div class="sound" role="group" aria-label="Sound">
+          <button id="mute" class="icon" title="Mute / unmute everything (M)" aria-pressed="false">🔊</button>
+          <input id="vol-master" type="range" min="0" max="1" step="0.05" value="0.9" aria-label="Volume" title="Volume" />
+          <span class="hear-label">Hear</span>
+          <div class="seg small" id="hear-seg" role="radiogroup" aria-label="What you hear">
+            <button data-hear="rec" role="radio" title="Only the original recording">Recording</button>
+            <button data-hear="both" role="radio" title="The recording plus the simulated guitar playing the notes on screen">Both</button>
+            <button data-hear="sim" role="radio" title="Only the simulated guitar playing the notes on screen">Simulation</button>
+          </div>
+          <button id="mix-btn" class="mix-btn" aria-expanded="false" aria-controls="mix-pop" title="Fine-tune each sound">Mix ▾</button>
+          <div id="mix-pop" class="mix-pop" hidden>
+            <div class="mix-title">Fine-tune the mix</div>
+            <label class="mix-row"><span>Guitar in the recording</span><input id="vol-guitar" type="range" min="0" max="1" step="0.05" value="1" /><b data-for="vol-guitar"></b></label>
+            <label class="mix-row"><span>Voice &amp; other instruments</span><input id="vol-backing" type="range" min="0" max="1" step="0.05" value="0.8" /><b data-for="vol-backing"></b></label>
+            <label class="mix-row"><span>Simulated guitar</span><input id="vol-synth" type="range" min="0" max="1" step="0.05" value="0.6" /><b data-for="vol-synth"></b></label>
+            <p class="mix-hint">Play along: turn <b>Guitar in the recording</b> down to 0 and keep the voice.<br />Keys: <kbd>M</kbd> mute · <kbd>S</kbd> recording / both / simulation.</p>
+          </div>
         </div>
         <label class="toggle"><input type="checkbox" id="click" /> Metronome</label>
         <button id="countin" title="Count-in before playing">Count-in</button>

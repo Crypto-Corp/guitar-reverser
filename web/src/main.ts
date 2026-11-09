@@ -179,7 +179,7 @@ function renderInfo(s: Song) {
     ${v.guitarVisibleSeconds ? `Guitar visible <b>${v.guitarVisibleSeconds}s</b> · hands tracked in <b>${v.handFrames}</b> frames ·
     fret position read in <b>${v.positionFrames}</b> frames (green marks on the timeline).<br/>` : "Audio only.<br/>"}
     Pipeline: ${m.pipeline.filter(Boolean).join(" → ")}.<br/>
-    <span title="Shortcuts">⌨ space play · ←/→ seek · L loop · 1/2/3 modes · −/+ speed</span>`;
+    <span title="Shortcuts">⌨ space play · ←/→ seek · L loop · M mute · S recording/both/simulation · 1/2/3 modes · −/+ speed</span>`;
 }
 
 /** Pattern of the section being played (falls back to the song's most common bar). */
@@ -387,34 +387,61 @@ speed.oninput = () => {
   $("speed-val").textContent = `${Math.round(parseFloat(speed.value) * 100)}%`;
 };
 // ---------------------------------------------------------------- sound
-// Original recording (two stems) + the simulation's own sound (synth playing the
-// notes on screen) + a master mute. Choices are remembered.
+// "What do you want to hear?": the recording, the simulated guitar (the notes on screen),
+// or both; one volume; a mute; a Mix panel for the three individual levels.
+type Hear = "rec" | "both" | "sim";
 const vg = $("vol-guitar") as HTMLInputElement, vb = $("vol-backing") as HTMLInputElement;
-const vs = $("vol-synth") as HTMLInputElement;
+const vs = $("vol-synth") as HTMLInputElement, vm = $("vol-master") as HTMLInputElement;
 vg.value = store.get("volGuitar", vg.value);
 vb.value = store.get("volBacking", vb.value);
 vs.value = store.get("volSynth", vs.value);
-let simOn = store.get("sim", "1") === "1";
+vm.value = store.get("volMaster", vm.value);
+let hear: Hear = (store.get("hear", "both") as Hear);
 let muted = store.get("muted", "0") === "1";
 const applySound = () => {
-  engine.setVolumes(parseFloat(vg.value), parseFloat(vb.value));
-  engine.setSynth(simOn, parseFloat(vs.value));
+  const master = parseFloat(vm.value);
+  const rec = hear !== "sim" ? master : 0;
+  engine.setVolumes(parseFloat(vg.value) * rec, parseFloat(vb.value) * rec);
+  engine.setSynth(hear !== "rec", parseFloat(vs.value) * master);
   engine.setMuted(muted);
-  const sb = $("synth"), mb = $("mute");
-  sb.classList.toggle("on", simOn);
-  sb.setAttribute("aria-pressed", String(simOn));
-  vs.disabled = !simOn;
-  mb.textContent = muted ? "🔇" : "🔊";
+  document.querySelectorAll<HTMLButtonElement>("#hear-seg button").forEach((b) => {
+    const on = b.dataset.hear === hear;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  });
+  const mb = $("mute");
+  mb.textContent = muted ? "🔇" : master < 0.4 ? "🔈" : "🔊";
   mb.classList.toggle("on", muted);
   mb.setAttribute("aria-pressed", String(muted));
+  mb.title = muted ? "Sound is muted: click to unmute (M)" : "Mute everything (M)";
+  vm.disabled = muted;
+  // dim the levels that are not heard in the current choice
+  vg.closest(".mix-row")!.classList.toggle("off", hear === "sim");
+  vb.closest(".mix-row")!.classList.toggle("off", hear === "sim");
+  vs.closest(".mix-row")!.classList.toggle("off", hear === "rec");
+  document.querySelectorAll<HTMLElement>(".mix-row b").forEach((el) => {
+    const inp = document.getElementById(el.dataset.for!) as HTMLInputElement;
+    el.textContent = `${Math.round(parseFloat(inp.value) * 100)}%`;
+  });
   store.set("volGuitar", vg.value); store.set("volBacking", vb.value); store.set("volSynth", vs.value);
-  store.set("sim", simOn ? "1" : "0"); store.set("muted", muted ? "1" : "0");
+  store.set("volMaster", vm.value); store.set("hear", hear); store.set("muted", muted ? "1" : "0");
 };
-const toggleSim = () => { simOn = !simOn; applySound(); };
+const setHear = (h: Hear) => { hear = h; muted = false; applySound(); };
+const cycleHear = () => setHear(hear === "rec" ? "both" : hear === "both" ? "sim" : "rec");
 const toggleMute = () => { muted = !muted; applySound(); };
-vg.oninput = vb.oninput = vs.oninput = applySound;
-$("synth").onclick = toggleSim;
+document.querySelectorAll<HTMLButtonElement>("#hear-seg button").forEach((b) => (b.onclick = () => setHear(b.dataset.hear as Hear)));
+vg.oninput = vb.oninput = vs.oninput = vm.oninput = applySound;
 $("mute").onclick = toggleMute;
+const pop = $("mix-pop"), mixBtn = $("mix-btn");
+const showMix = (open: boolean) => {
+  pop.hidden = !open;
+  mixBtn.setAttribute("aria-expanded", String(open));
+  mixBtn.classList.toggle("on", open);
+};
+mixBtn.onclick = (e) => { e.stopPropagation(); showMix(pop.hidden); };
+pop.onclick = (e) => e.stopPropagation();
+document.addEventListener("click", () => showMix(false));
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") showMix(false); });
 applySound();
 ($("click") as HTMLInputElement).onchange = (e) => engine.setClick((e.target as HTMLInputElement).checked);
 engine.on(() => ($("play").textContent = engine.playing ? "❚❚" : "▶"));
@@ -426,7 +453,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.code === "ArrowRight") engine.seek(engine.time + 5);
   else if (e.key === "l" || e.key === "L") toggleLoop();
   else if (e.key === "m" || e.key === "M") toggleMute();
-  else if (e.key === "s" || e.key === "S") toggleSim();
+  else if (e.key === "s" || e.key === "S") cycleHear();
   else if (e.key === "1") setMode("chords");
   else if (e.key === "2") setMode("easy");
   else if (e.key === "3") setMode("full");
